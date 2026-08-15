@@ -12,10 +12,44 @@
 
         <Button
             android:id="@+id/btn_select"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:padding="12dp"
             android:text="Connect" />
+
+        <Button
+            android:id="@+id/btn_scan"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Scan"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- BLE device list panel, hidden by default -->
+    <LinearLayout
+        android:id="@+id/device_list_panel"
+        android:layout_width="match_parent"
+        android:layout_height="200dp"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:background="#FFF2F2F2" >
+
+        <TextView
+            android:id="@+id/scan_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="4dp"
+            android:text="Scanning for devices..."
+            android:textSize="14sp" />
+
+        <ListView
+            android:id="@+id/device_list_view"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:background="#FFFFFFFF" />
+
     </LinearLayout>
 
     <LinearLayout
@@ -141,6 +175,52 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Start Download" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" >
+
+                <Button
+                    android:id="@+id/button_led_test"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="LED Test" />
+
+                <Button
+                    android:id="@+id/button_led_toggle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="LED On/Off" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" >
+
+                <Button
+                    android:id="@+id/button_sync_time"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Sync Time" />
+
+                <Button
+                    android:id="@+id/button_get_time"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Get Time" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/textView_time"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Device time: --" />
 
             <TextView
                 android:id="@+id/textViewFwVer"

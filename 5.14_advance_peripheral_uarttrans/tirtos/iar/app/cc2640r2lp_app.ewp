@@ -1084,6 +1084,24 @@
             <name>$PROJ_DIR$\..\..\..\src\app\epd2in13.h</name>
         </file>
         <file>
+            <name>$PROJ_DIR$\..\..\..\src\app\epd_clock.c</name>
+        </file>
+        <file>
+            <name>$PROJ_DIR$\..\..\..\src\app\epd_clock.h</name>
+        </file>
+        <file>
+            <name>$PROJ_DIR$\..\..\..\src\app\epd_font.c</name>
+        </file>
+        <file>
+            <name>$PROJ_DIR$\..\..\..\src\app\epd_font.h</name>
+        </file>
+        <file>
+            <name>$PROJ_DIR$\..\..\..\src\app\lunar.c</name>
+        </file>
+        <file>
+            <name>$PROJ_DIR$\..\..\..\src\app\lunar.h</name>
+        </file>
+        <file>
             <name>$PROJ_DIR$\..\..\..\src\app\epd_test.c</name>
             <excluded>
                 <configuration>FlashROM_StackLibrary</configuration>

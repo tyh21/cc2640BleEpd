@@ -12,6 +12,7 @@
 #include "board.h"
 //#include <ti/drivers/uart/UARTCC26XX.h>
 #include "task_epd.h"
+#include "epd_clock.h"
 
 
 // if defined, not calling actual epd function, just test protocol
@@ -48,23 +49,35 @@ uint8_t VERSION_MINOR = 2;
 
    EPD_CMD_UPDATE_DISPLAY = 0x21,  // ask epd to show ram data
    
-   EPD_CMD_READ_VERSION = 0x22,
+    EPD_CMD_READ_VERSION = 0x22,
 
-};
+    EPD_CMD_CLEAR = 0x30,       // 一键清屏: Init+Clear+Sleep
+    EPD_CMD_TEST_PATTERN = 0x31, // 一键测试: Init+棋盘格+Sleep
+    EPD_CMD_ALL_BLACK = 0x32,    // 一键全黑: Init+全黑+Sleep
+
+    EPD_CMD_LED_TEST = 0x40,     // LED测试: 三色各亮2秒
+    EPD_CMD_LED_TOGGLE = 0x41,   // LED开关: 三色全亮/全灭切换
+
+    EPD_CMD_SET_TIME = 0x50,     // 设置时间
+    EPD_CMD_GET_TIME = 0x51,     // 获取时间
+
+    EPD_CMD_SWITCH_FACE = 0x60,  // 切换时钟表盘
+
+  };
  
  
  
 #define EPD_TASK_PRIORITY                     2
-#define EPD_TASK_STACK_SIZE                   900
+#define EPD_TASK_STACK_SIZE                   2048
 Task_Struct EPDTask;
 Char EPDTaskStack[EPD_TASK_STACK_SIZE];
 
 // cc2640 received epd command frame from andoid app
 // first byte is length, second is command, third and follow are command data if any
-static uint8_t epd_rx_frame[200];
+static uint8_t epd_rx_frame[251];
 uint8_t rx_fram_len = 0;
 
-static uint8_t epd_resp_frame[6];
+static uint8_t epd_resp_frame[11];
 uint8_t resp_fram_len = 1;
 
 EpdResponseCallback respCallback = NULL;
@@ -73,16 +86,25 @@ EpdResponseCallback respCallback = NULL;
 Event_Struct EPDEvent;
 Event_Handle hEPDEvent;
 
-#define EPDTASK_EVENT_RX_REQUEST      Event_Id_00 
+#define EPDTASK_EVENT_RX_REQUEST      Event_Id_00
+#define EPDTASK_EVENT_CLOCK_TICK      Event_Id_01
 
 
-#define EPDTASK_EVENT_ALL ( EPDTASK_EVENT_RX_REQUEST  )
+#define EPDTASK_EVENT_ALL ( EPDTASK_EVENT_RX_REQUEST | EPDTASK_EVENT_CLOCK_TICK )
+
+// Flag: image transfer in progress, pause clock refresh
+static uint8_t s_img_transfer_active = 0;
                             
                                          
 
 static void handle_cmd();       
 void TaskEPD_taskFxn(UArg a0, UArg a1);
 static void post_epd_response(uint8_t *buf, uint16_t len);
+
+// Clock tick period (ms)
+#define CLOCK_TICK_PERIOD_MS  1000
+static Clock_Struct clockTickClock;
+static void clockTickCb(UArg arg);
 
 
 void TaskEPD_createTask(void)
@@ -114,8 +136,13 @@ void TaskEPD_taskInit(void)
 #ifndef EPD_DRY_RUN
      epd_hw_init();
 #endif
-    
-    
+
+    // Initialize clock subsystem
+    epd_clock_init();
+
+    // Start 1-second periodic clock for clock tick
+    Util_constructClock(&clockTickClock, clockTickCb,
+                         CLOCK_TICK_PERIOD_MS, CLOCK_TICK_PERIOD_MS, true, 0);
 }
 
 /*********************************************************************
@@ -155,6 +182,24 @@ void TaskEPD_taskFxn(UArg a0, UArg a1)
       }
       
     }
+
+    if(events & EPDTASK_EVENT_CLOCK_TICK)
+    {
+      // Skip clock refresh while image transfer is in progress
+      if (!s_img_transfer_active) {
+        uint8_t refresh = epd_clock_need_refresh();
+        if (refresh)
+        {
+#ifndef EPD_DRY_RUN
+          if (refresh == 2) {
+            epd_clock_render(0);  // full refresh (after set_time)
+          } else {
+            epd_clock_render(1);  // partial refresh (minute boundary)
+          }
+#endif
+        }
+      }
+    }
        
   }
 }
@@ -173,7 +218,7 @@ void EPDTask_RegisterResponseCallback(EpdResponseCallback callback)
 
 
 
-void post_epd_response(uint8_t *buf, uint16_t len)
+static void post_epd_response(uint8_t *buf, uint16_t len)
 {
     
     if (respCallback != NULL) {
@@ -215,6 +260,7 @@ void handle_cmd()
     
     case EPD_CMD_PREPARE_BLK_RAM:
     HWUART_Printf("prep blk ram\r\n");
+    s_img_transfer_active = 1;
     #ifndef EPD_DRY_RUN
    EPD_2IN13_PrepareBlkRAM();
 #endif
@@ -245,6 +291,7 @@ void handle_cmd()
     
    case EPD_CMD_UPDATE_DISPLAY:
     HWUART_Printf("update display\r\n");
+    s_img_transfer_active = 0;  // image transfer done
      #ifndef EPD_DRY_RUN
    EPD_2IN13_UpdateDisplay();
 #endif
@@ -252,11 +299,78 @@ void handle_cmd()
     
     case EPD_CMD_DEINIT:
     HWUART_Printf("deinit\r\n");
+    s_img_transfer_active = 0;  // image transfer done
      #ifndef EPD_DRY_RUN
-     EPD_2IN13_Sleep();
+      EPD_2IN13_Sleep();
 #endif
     break;
     
+    case EPD_CMD_CLEAR:
+    HWUART_Printf("clear\r\n");
+    s_img_transfer_active = 0;
+    #ifndef EPD_DRY_RUN
+    EPD_2IN13_QuickCmd(0x30);
+#endif
+    break;
+    
+    case EPD_CMD_TEST_PATTERN:
+    HWUART_Printf("test pattern\r\n");
+    s_img_transfer_active = 0;
+    #ifndef EPD_DRY_RUN
+    EPD_2IN13_QuickCmd(0x31);
+#endif
+    break;
+    
+    case EPD_CMD_ALL_BLACK:
+    HWUART_Printf("all black\r\n");
+    s_img_transfer_active = 0;
+    #ifndef EPD_DRY_RUN
+    EPD_2IN13_QuickCmd(0x32);
+#endif
+    break;
+
+    case EPD_CMD_LED_TEST:
+    HWUART_Printf("led test\r\n");
+    EPD_2IN13_LedTest();
+    break;
+
+    case EPD_CMD_LED_TOGGLE:
+    HWUART_Printf("led toggle\r\n");
+    EPD_2IN13_LedToggle();
+    break;
+
+    case EPD_CMD_SET_TIME:
+    HWUART_Printf("set time\r\n");
+    // data: year_lo, month, day, hour, minute, second, ms_hi, ms_lo (8 bytes)
+    if (rx_fram_len >= 9) {
+        epd_clock_set_time(epd_rx_frame + 1);
+    }
+    // resp_fram_len defaults to 1 (set at top of handle_cmd), echoes cmd byte as ACK
+    break;
+
+    case EPD_CMD_GET_TIME:
+    HWUART_Printf("get time\r\n");
+    {
+        epd_time_t t = epd_clock_get_time();
+        resp_fram_len = 9;
+        epd_resp_frame[1] = (uint8_t)(t.year - 2000U);
+        epd_resp_frame[2] = t.month;
+        epd_resp_frame[3] = t.day;
+        epd_resp_frame[4] = t.hour;
+        epd_resp_frame[5] = t.minute;
+        epd_resp_frame[6] = t.second;
+        epd_resp_frame[7] = (uint8_t)(t.millisecond >> 8);
+        epd_resp_frame[8] = (uint8_t)(t.millisecond & 0xFF);
+    }
+    break;
+
+    case EPD_CMD_SWITCH_FACE:
+    HWUART_Printf("switch face\r\n");
+    epd_clock_switch_face();
+    resp_fram_len = 2;
+    epd_resp_frame[1] = epd_clock_get_face();
+    break;
+
   default:
     HWUART_Printf("unknown cmd\r\n");
     resp_fram_len = 0;
@@ -272,4 +386,10 @@ void EPDTask_parseCommand(uint8_t *pMsg, uint8_t length)
   rx_fram_len = length;
     Event_post(hEPDEvent, EPDTASK_EVENT_RX_REQUEST);
   
+}
+
+static void clockTickCb(UArg arg)
+{
+  epd_clock_tick();
+  Event_post(hEPDEvent, EPDTASK_EVENT_CLOCK_TICK);
 }

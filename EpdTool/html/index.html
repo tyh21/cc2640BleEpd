@@ -1,0 +1,852 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CC2640R2 电子墨水屏蓝牙控制器</title>
+    <style>
+:root {
+    --primary-color: #0d6efd;
+    --primary-hover: #0b5ed7;
+    --secondary-color: #6c757d;
+    --secondary-hover: #5c636a;
+    --dark-bg: #121212;
+    --dark-text: #e0e0e0;
+    --dark-fieldset-bg: #1e1e1e;
+    --dark-border: #333;
+    --dark-code-bg: #2d2d2d;
+    --dark-log-bg: #2a2a2a;
+    --dark-input-bg: #2d2d2d;
+    --dark-input-text: #e0e0e0;
+}
+body {
+    margin: 0; padding: 0;
+    font-family: system-ui, -apple-system, sans-serif;
+    overflow-x: hidden;
+}
+.debug { display: none !important; }
+body.debug-mode .debug { display: flex !important; }
+body.debug-mode { background-color: var(--dark-bg); color: var(--dark-text); }
+body.debug-mode .main { background-color: var(--dark-bg); color: var(--dark-text); }
+body.debug-mode fieldset { background-color: var(--dark-fieldset-bg); box-shadow: 0 .5rem .5rem rgba(0,0,0,.5); }
+body.debug-mode h3 { border-bottom: 1px solid var(--dark-border); color: var(--dark-text); }
+body.debug-mode code { background: var(--dark-code-bg); color: #ff9800; }
+body.debug-mode #log { background: var(--dark-log-bg); border: 1px solid var(--dark-border); }
+body.debug-mode #log .time { color: #8bc34a; }
+body.debug-mode #log .action { color: #03a9f4; }
+body.debug-mode input, body.debug-mode select { background-color: var(--dark-input-bg); color: var(--dark-input-text); border-color: var(--dark-border); }
+body.debug-mode fieldset legend { color: #64b5f6; }
+
+.main {
+    width: 100%; max-width: 950px; margin: 0 auto; padding: 0 1rem;
+    background: #fff; font-size: 1rem; box-sizing: border-box;
+}
+.footer { display: flex; gap: 10px; font-size: .8rem; color: #666; flex-wrap: wrap; margin: 1rem 0; }
+.footer a { color: #666; text-decoration: none; }
+h3 { padding-bottom: .3em; border-bottom: 1px solid #CCC; text-align: center; }
+fieldset {
+    border: none; box-shadow: 0 .5rem .5rem rgba(0,0,0,.2);
+    background-color: #f8f9fa; padding: 10px; margin-bottom: 16px; border-radius: 4px;
+}
+fieldset legend { font-weight: bold; color: rgba(0,0,255,.6); }
+.flex-container { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.flex-group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#status { margin: 10px 0; }
+#log {
+    width: 100%; min-height: 80px; max-height: 250px; margin: 0; padding: 5px;
+    background: #DDD; overflow-y: auto; overflow-x: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    box-sizing: border-box; word-break: break-word;
+}
+#log div { padding: 2px 0; }
+#log .time { color: #333; margin-right: .5em; white-space: nowrap; display: inline-block; }
+#log .action { color: #666; margin-right: .5em; display: inline-block; white-space: nowrap; }
+#canvas { border: black solid 1px; max-width: 100%; height: auto; display: block; margin: 0 auto; }
+button {
+    padding: .375rem .75rem; border: 1px solid var(--primary-color);
+    border-radius: .375rem; margin-bottom: 5px; white-space: nowrap;
+    cursor: pointer; font-size: .9rem;
+}
+button:disabled { opacity: .65; }
+button.primary { color: #fff; background-color: var(--primary-color); }
+button.primary:hover { color: #fff; border-color: var(--primary-hover); background-color: var(--primary-hover); }
+button.secondary { color: #fff; background-color: var(--secondary-color); border-color: var(--secondary-color); }
+button.secondary:hover { color: #fff; border-color: var(--secondary-hover); background-color: var(--secondary-hover); }
+button.danger { color: #fff; background-color: #dc3545; border-color: #dc3545; }
+button.danger:hover { background-color: #bb2d37; border-color: #b02a37; }
+input, select {
+    font-size: 1rem; line-height: 1.5; color: #212529;
+    border: 1px solid #dee2e6; border-radius: .375rem; padding: .2rem .75rem;
+    max-width: 100%; box-sizing: border-box;
+}
+select { padding: .3rem 2.25rem .3rem .75rem; }
+input:focus, select:focus { border: 1px solid #86b7fe; box-shadow: 0 0 4px rgba(0,120,215,.8); outline: 0; }
+label { margin-right: 4px; white-space: nowrap; }
+.status-bar { font-size: 85%; color: #666; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px dotted #AAA; }
+.progress-bar { width: 100%; background: #e9ecef; border-radius: 4px; overflow: hidden; margin: 5px 0; }
+.progress-fill { height: 20px; background: var(--primary-color); transition: width .2s; text-align: center; color: #fff; font-size: .8rem; line-height: 20px; }
+
+.tool-button {
+    width: 36px; height: 36px; font-size: 1.2rem;
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-right: 5px; background-color: #f8f9fa; border: 1px solid #dee2e6;
+    border-radius: 4px; padding: 0; cursor: pointer; transition: all .2s ease;
+}
+.tool-button:hover { background-color: #e9ecef; border-color: #ced4da; }
+.tool-button.active { background-color: var(--primary-color); color: white; border-color: var(--primary-color); }
+
+.canvas-title { text-align: center; margin-bottom: 5px; color: var(--primary-color); font-size: .85rem; }
+.canvas-tools { margin-top: 10px; justify-content: center; }
+.text-tools { display: none; }
+
+.canvas-container { margin-top: 10px; }
+.info-tag { display: inline-block; background: #e9ecef; border-radius: 4px; padding: 2px 8px; font-size: .8rem; color: #495057; margin-left: 8px; }
+
+@media (max-width: 768px) {
+    .flex-container { flex-direction: column; }
+    .canvas-tools.flex-container { flex-direction: row; flex-wrap: wrap; justify-content: center; }
+    .canvas-tools .flex-group { justify-content: center; width: 100%; }
+    fieldset { padding: 8px; }
+}
+    </style>
+</head>
+<body>
+    <div class="main">
+        <h3>CC2640R2 电子墨水屏蓝牙控制器 <span class="info-tag">SSD1680 212x104</span></h3>
+
+        <fieldset>
+            <legend>蓝牙连接</legend>
+            <div class="flex-container">
+                <div class="flex-group">
+                    <button id="connectBtn" class="primary" onclick="toggleConnect()">连接</button>
+                    <button id="reconnectBtn" class="secondary" disabled onclick="doReconnect()">重连</button>
+                    <button class="secondary" onclick="clearLog()">清空日志</button>
+                </div>
+                <div class="flex-group">
+                    <label>固件版本:</label>
+                    <span id="fwVer">--</span>
+                </div>
+            </div>
+            <div id="log"></div>
+        </fieldset>
+
+        <fieldset>
+            <legend>快捷命令</legend>
+            <div class="flex-container">
+                <div class="flex-group">
+                    <button id="clearBtn" class="primary" disabled onclick="quickCmd(0x30, '清屏')">清屏</button>
+                    <button id="testBtn" class="primary" disabled onclick="quickCmd(0x31, '棋盘格')">棋盘格</button>
+                    <button id="blackBtn" class="primary" disabled onclick="quickCmd(0x32, '全黑')">全黑</button>
+                </div>
+                <div class="flex-group">
+                    <button id="ledTestBtn" class="secondary" disabled onclick="quickCmd(0x40, 'LED测试')">LED测试</button>
+                    <button id="ledToggleBtn" class="secondary" disabled onclick="quickCmd(0x41, 'LED开关')">LED开关</button>
+                </div>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>时钟</legend>
+            <div class="flex-container">
+                <div class="flex-group">
+                    <button id="syncTimeBtn" class="primary" disabled onclick="syncTime()">同步本机时间</button>
+                    <button id="getTimeBtn" class="secondary" disabled onclick="getTime()">读取设备时间</button>
+                    <button id="switchFaceBtn" class="secondary" disabled onclick="switchFace()">切换表盘</button>
+                </div>
+                <div class="flex-group">
+                    <label>设备时间:</label>
+                    <span id="deviceTime">--:--:--</span>
+                    <label style="margin-left:12px">表盘:</label>
+                    <span id="faceName">点阵</span>
+                </div>
+            </div>
+        </fieldset>
+
+        <fieldset>
+            <legend>蓝牙传图</legend>
+            <div class="flex-container">
+                <div class="flex-group">
+                    <label for="imageFile">选择图片</label>
+                    <input type="file" id="imageFile" accept=".png,.jpg,.bmp,.webp,.jpeg" onchange="loadImageFile()">
+                </div>
+                <div class="flex-group">
+                    <label for="dithering">取模算法</label>
+                    <select id="dithering" onchange="convertDithering()">
+                        <option value="none">二值化</option>
+                        <option value="bayer">Bayer</option>
+                        <option value="floydsteinberg">Floyd-Steinberg</option>
+                        <option value="atkinson">Atkinson</option>
+                    </select>
+                </div>
+                <div class="flex-group">
+                    <label for="threshold">阈值</label>
+                    <input type="number" id="threshold" value="128" min="0" max="255" style="width:70px" onchange="convertDithering()">
+                </div>
+            </div>
+            <div class="status-bar"><b>状态：</b><span id="status">就绪</span></div>
+            <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+            <div class="flex-container">
+                <div class="flex-group">
+                    <button class="secondary" onclick="clearCanvas()">清除画布</button>
+                    <button id="sendImgBtn" class="primary" disabled onclick="sendImage()">发送图片</button>
+                </div>
+            </div>
+            <div class="canvas-container">
+                <div class="canvas-title" id="canvasTitle"></div>
+                <canvas id="canvas" width="104" height="212"></canvas>
+                <div class="flex-container canvas-tools">
+                    <div class="flex-group">
+                        <button id="brushBtn" class="tool-button" title="画笔">&#9998;</button>
+                        <button id="eraserBtn" class="tool-button" title="橡皮擦">&#9744;</button>
+                        <button id="textBtn" class="tool-button" title="添加文字">T</button>
+                        <label>画笔</label>
+                        <select id="brushColor">
+                            <option value="#000000">黑色</option>
+                            <option value="#FF0000">红色</option>
+                            <option value="#FFFFFF">白色</option>
+                        </select>
+                        <input type="number" id="brushSize" value="1" min="1" max="20" style="width:55px">
+                    </div>
+                </div>
+                <div class="flex-container canvas-tools">
+                    <div class="flex-group text-tools" id="textTools">
+                        <label for="fontFamily">字体</label>
+                        <select id="fontFamily">
+                            <option value="Arial">Arial</option>
+                            <option value="monospace">Monospace</option>
+                            <option value="SimSun">宋体</option>
+                            <option value="SimHei">黑体</option>
+                            <option value="Microsoft Yahei">微软雅黑</option>
+                            <option value="KaiTi">楷体</option>
+                            <option value="FangSong">仿宋</option>
+                        </select>
+                        <label>大小</label>
+                        <input type="number" id="fontSize" value="8" min="1" max="50" style="width:55px">
+                        <input type="text" id="textInput" placeholder="输入文字" style="width:100px">
+                        <button id="textBoldBtn" style="font-weight:bold">B</button>
+                        <button id="textItalicBtn" style="font-style:italic">I</button>
+                        <button id="addTextBtn" class="primary">添加</button>
+                    </div>
+                </div>
+            </div>
+        </fieldset>
+
+        <div class="footer">
+            <span>&copy; 2026 CC2640R2 EPD Tool</span>
+            <span class="debug"><a href="?debug=true" id="debugToggle">开发模式</a></span>
+        </div>
+    </div>
+
+<script>
+// ============================================================
+// CC2640R2 BLE UUID
+// ============================================================
+const SERVICE_UUID = 'f000fff0-0451-4000-b000-000000000000';
+const CHAR_UUID    = 'f000fff1-0451-4000-b000-000000000000';
+
+// EPD Commands (CC2640R2 firmware)
+const CMD = {
+    INIT: 0x11, DEINIT: 0x12,
+    PREP_BLK: 0x13, WRITE_BLK: 0x14,
+    PREP_RED: 0x18, WRITE_RED: 0x19,
+    UPDATE: 0x21, READ_VER: 0x22,
+    CLEAR: 0x30, TEST: 0x31, ALLBLACK: 0x32,
+    LED_TEST: 0x40, LED_TOGGLE: 0x41,
+    SET_TIME: 0x50, GET_TIME: 0x51,
+    SWITCH_FACE: 0x60
+};
+
+const EPD_WIDTH = 104, EPD_HEIGHT = 212;
+const BYTES_PER_ROW = EPD_WIDTH / 8;   // 13 bytes of pixel data per row
+const RAM_ROW_SIZE = 16;               // SSD1680 RAM row width = 16 bytes (13 data + 3 padding)
+const FRAME_SIZE = 16;                 // 1 frame = 1 row = 16 bytes
+const TOTAL_FRAMES = EPD_HEIGHT;       // 212 frames
+
+let bleDevice, gattServer, epdService, epdChar;
+let canvas, ctx;
+let painting = false, lastX = 0, lastY = 0;
+let brushColor = '#000000', brushSize = 1, currentTool = null;
+let textBold = false, textItalic = false, isTextMode = false;
+let lineSegments = [], textElements = [];
+let connected = false;
+
+// ============================================================
+// BLE 连接
+// ============================================================
+async function toggleConnect() {
+    if (connected) {
+        if (bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+    } else {
+        await doConnect();
+    }
+}
+
+async function doConnect() {
+    try {
+        bleDevice = await navigator.bluetooth.requestDevice({
+            optionalServices: [SERVICE_UUID],
+            acceptAllDevices: true
+        });
+    } catch (e) {
+        addLog('请检查蓝牙和浏览器支持 (推荐Chrome/Edge)');
+        return;
+    }
+    bleDevice.addEventListener('gattserverdisconnected', onDisconnect);
+    await connectGatt();
+}
+
+async function doReconnect() {
+    if (!bleDevice) return;
+    await connectGatt();
+}
+
+async function connectGatt() {
+    try {
+        addLog('正在连接: ' + (bleDevice.name || '未知设备'));
+        gattServer = await bleDevice.gatt.connect();
+        epdService = await gattServer.getPrimaryService(SERVICE_UUID);
+        epdChar = await epdService.getCharacteristic(CHAR_UUID);
+        // 启用 Notify
+        await epdChar.startNotifications();
+        epdChar.addEventListener('characteristicvaluechanged', onNotify);
+        connected = true;
+        document.getElementById('connectBtn').textContent = '断开';
+        document.getElementById('connectBtn').className = 'danger';
+        document.getElementById('reconnectBtn').disabled = true;
+        updateButtons();
+        addLog('已连接: ' + (bleDevice.name || '未知设备'));
+        // 读取版本
+        await readVersion();
+    } catch (e) {
+        addLog('连接失败: ' + e.message);
+        onDisconnect();
+    }
+}
+
+function onDisconnect() {
+    connected = false;
+    gattServer = null; epdService = null; epdChar = null;
+    document.getElementById('connectBtn').textContent = '连接';
+    document.getElementById('connectBtn').className = 'primary';
+    document.getElementById('reconnectBtn').disabled = (bleDevice == null);
+    updateButtons();
+    addLog('已断开连接');
+}
+
+let notifyResolver = null;  // Promise resolver for waiting Notify response
+
+function onNotify(event) {
+    const data = new Uint8Array(event.target.value.buffer);
+    addLog('收到: ' + bytes2hex(data), '\u21D3');
+    if (notifyResolver) {
+        const resolver = notifyResolver;
+        notifyResolver = null;
+        resolver(data);
+    }
+}
+
+async function waitNotify(timeout = 5000) {
+    return new Promise((resolve) => {
+        notifyResolver = resolve;
+        setTimeout(() => {
+            if (notifyResolver === resolve) {
+                notifyResolver = null;
+                resolve(null);
+            }
+        }, timeout);
+    });
+}
+
+function updateButtons() {
+    const s = connected ? false : true;
+    document.getElementById('clearBtn').disabled = s;
+    document.getElementById('testBtn').disabled = s;
+    document.getElementById('blackBtn').disabled = s;
+    document.getElementById('ledTestBtn').disabled = s;
+    document.getElementById('ledToggleBtn').disabled = s;
+    document.getElementById('sendImgBtn').disabled = s;
+    document.getElementById('syncTimeBtn').disabled = s;
+    document.getElementById('getTimeBtn').disabled = s;
+    document.getElementById('switchFaceBtn').disabled = s;
+}
+
+// ============================================================
+// BLE 写入
+// ============================================================
+async function writeCmd(data, withResponse = true) {
+    if (!epdChar) { addLog('未连接'); return false; }
+    try {
+        const payload = typeof data === 'number' ? new Uint8Array([data]) : new Uint8Array(data);
+        addLog(bytes2hex(payload), '\u21D1');
+        if (withResponse)
+            await epdChar.writeValueWithResponse(payload);
+        else
+            await epdChar.writeValueWithoutResponse(payload);
+        return true;
+    } catch (e) {
+        addLog('写入失败: ' + e.message);
+        return false;
+    }
+}
+
+// ============================================================
+// 固件版本
+// ============================================================
+async function readVersion() {
+    try {
+        // 发送读版本命令, 固件通过 Notify 回复
+        await writeCmd(CMD.READ_VER);
+        // 版本会在 onNotify 中显示
+    } catch (e) { /* ignore */ }
+}
+
+// ============================================================
+// 快捷命令
+// ============================================================
+async function quickCmd(cmd, name) {
+    addLog('发送: ' + name);
+    setStatus('正在' + name + '...');
+    await writeCmd(cmd);
+    setStatus(name + ' 命令已发送');
+}
+
+// ============================================================
+// 发送原始命令
+// ============================================================
+async function sendRawCmd() {
+    const hex = document.getElementById('cmdInput').value.replace(/\s/g, '');
+    if (!hex) return;
+    const bytes = hex2bytes(hex);
+    await writeCmd(bytes);
+}
+
+// ============================================================
+// 图片传输
+// ============================================================
+async function sendImage() {
+    const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progressFill');
+    const startTime = Date.now();
+
+    setStatus('初始化EPD...');
+    setProgress(2);
+    await writeCmd(CMD.INIT);
+    await waitNotify(10000);
+    await delay(50);
+
+    // 准备黑图RAM
+    setStatus('写入黑图数据...');
+    setProgress(5);
+    await writeCmd(CMD.PREP_BLK);
+    await waitNotify();
+    await delay(20);
+
+    // 黑图分帧 (212行×16字节=3392字节, 每帧16字节=1行, 共212帧)
+    const bwData = canvas2ram(canvas);
+    for (let i = 0; i < TOTAL_FRAMES; i++) {
+        const frame = bwData.slice(i * FRAME_SIZE, (i + 1) * FRAME_SIZE);
+        const payload = [CMD.WRITE_BLK, ...frame];
+        await writeCmd(payload, false);  // write without response, 不等BLE ACK
+        await waitNotify();  // 等固件Notify回复再发下一帧
+        const pct = 5 + Math.round(i / TOTAL_FRAMES * 80);
+        setProgress(pct);
+        setStatus('写入黑图 ' + (i+1) + '/' + TOTAL_FRAMES);
+    }
+
+    // 刷新显示
+    setStatus('刷新显示...');
+    setProgress(88);
+    await writeCmd(CMD.UPDATE);
+    await waitNotify(30000);  // 刷新较慢
+    await delay(100);
+
+    // 休眠
+    setProgress(95);
+    await writeCmd(CMD.DEINIT);
+    await waitNotify();
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    setProgress(100);
+    setStatus('完成! 耗时 ' + elapsed + 's');
+    addLog('图片发送完成, 耗时 ' + elapsed + 's');
+}
+
+// ============================================================
+// Canvas → 3392字节数组 (212行×16字节, 13数据+3填充, 对齐SSD1680 RAM行宽)
+// ============================================================
+function canvas2ram(cvs) {
+    const c = cvs.getContext('2d');
+    const imgData = c.getImageData(0, 0, cvs.width, cvs.height);
+    const arr = new Array(EPD_HEIGHT * RAM_ROW_SIZE).fill(0xFF);  // 全0xFF(白色)
+
+    for (let y = 0; y < EPD_HEIGHT; y++) {
+        const rowOffset = y * RAM_ROW_SIZE;
+        for (let x = 0; x < EPD_WIDTH; x++) {
+            const i = (cvs.width * y + x) * 4;
+            const gray = imgData.data[i] * 0.299 + imgData.data[i+1] * 0.587 + imgData.data[i+2] * 0.114;
+            if (gray < 128) {  // 暗像素→清0(黑)
+                const byte_idx = rowOffset + (x >> 3);
+                const bit_idx = 7 - (x & 7);
+                arr[byte_idx] &= ~(1 << bit_idx);
+            }
+        }
+        // 每行末尾3字节已是0xFF, 无需额外操作
+    }
+    return arr;
+}
+
+// ============================================================
+// 图片加载
+// ============================================================
+function loadImageFile() {
+    const input = document.getElementById('imageFile');
+    if (!input.files.length) return;
+    const file = input.files[0];  // 先保存文件引用
+    // 只清画布，不清文件选择
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    lineSegments = []; textElements = [];
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = function() {
+        URL.revokeObjectURL(this.src);
+        ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, canvas.width, canvas.height);
+        convertDithering();
+    };
+}
+
+// ============================================================
+// 抖动算法 (与 EPD-nRF_213 参考项目一致)
+// ============================================================
+const bayerMap = [
+    [ 15, 135,  45, 165],
+    [195,  75, 225, 105],
+    [ 60, 180,  30, 150],
+    [240, 120, 210,  90]
+];
+
+function convertDithering() {
+    const mode = document.getElementById('dithering').value;
+    if (!mode) return;
+    const threshold = parseInt(document.getElementById('threshold').value);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = imageData.data;
+    const w = canvas.width;
+
+    // 灰度化
+    for (let i = 0; i < d.length; i += 4) {
+        d[i] = Math.floor(d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114);
+    }
+
+    for (let i = 0; i < d.length; i += 4) {
+        if (mode === 'none') {
+            d[i] = d[i] < threshold ? 0 : 255;
+        } else if (mode === 'bayer') {
+            const x = (i / 4) % w;
+            const y = Math.floor((i / 4) / w);
+            const map = Math.floor((d[i] + bayerMap[x % 4][y % 4]) / 2);
+            d[i] = map < threshold ? 0 : 255;
+        } else if (mode === 'floydsteinberg') {
+            const newPixel = d[i] < 129 ? 0 : 255;
+            const err = Math.floor((d[i] - newPixel) / 16);
+            d[i] = newPixel;
+            if (i + 4 < d.length) d[i + 4] += err * 7;
+            if (i + 4 * w - 4 > 0 && i + 4 * w - 4 < d.length) d[i + 4 * w - 4] += err * 3;
+            if (i + 4 * w > 0 && i + 4 * w < d.length) d[i + 4 * w] += err * 5;
+            if (i + 4 * w + 4 < d.length) d[i + 4 * w + 4] += err;
+        } else if (mode === 'atkinson') {
+            const newPixel = d[i] < threshold ? 0 : 255;
+            const err = Math.floor((d[i] - newPixel) / 8);
+            d[i] = newPixel;
+            if (i + 4 < d.length) d[i + 4] += err;
+            if (i + 8 < d.length) d[i + 8] += err;
+            if (i + 4 * w - 4 > 0 && i + 4 * w - 4 < d.length) d[i + 4 * w - 4] += err;
+            if (i + 4 * w > 0 && i + 4 * w < d.length) d[i + 4 * w] += err;
+            if (i + 4 * w + 4 < d.length) d[i + 4 * w + 4] += err;
+            if (i + 8 * w > 0 && i + 8 * w < d.length) d[i + 8 * w] += err;
+        }
+        d[i + 1] = d[i + 2] = d[i];
+    }
+    ctx.putImageData(imageData, 0, 0);
+    // 重绘文字和线条
+    redrawLineSegments();
+    redrawTextElements();
+}
+
+// ============================================================
+// Canvas 画图工具
+// ============================================================
+function initPaint() {
+    document.getElementById('brushBtn').onclick = () => toggleTool('brush');
+    document.getElementById('eraserBtn').onclick = () => toggleTool('eraser');
+    document.getElementById('textBtn').onclick = () => toggleTool('text');
+    document.getElementById('brushColor').onchange = (e) => { brushColor = e.target.value; };
+    document.getElementById('brushSize').onchange = (e) => { brushSize = parseInt(e.target.value); };
+    document.getElementById('addTextBtn').onclick = startTextPlacement;
+    document.getElementById('textBoldBtn').onclick = () => {
+        textBold = !textBold;
+        document.getElementById('textBoldBtn').classList.toggle('primary', textBold);
+    };
+    document.getElementById('textItalicBtn').onclick = () => {
+        textItalic = !textItalic;
+        document.getElementById('textItalicBtn').classList.toggle('primary', textItalic);
+    };
+
+    canvas.addEventListener('mousedown', onCanvasDown);
+    canvas.addEventListener('mousemove', onCanvasMove);
+    canvas.addEventListener('mouseup', onCanvasUp);
+    canvas.addEventListener('mouseleave', onCanvasUp);
+    canvas.addEventListener('click', onCanvasClick);
+
+    // 触摸
+    canvas.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        const t = e.touches[0];
+        canvas.dispatchEvent(new MouseEvent('mousedown', {clientX: t.clientX, clientY: t.clientY}));
+    });
+    canvas.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        const t = e.touches[0];
+        canvas.dispatchEvent(new MouseEvent('mousemove', {clientX: t.clientX, clientY: t.clientY}));
+    });
+    canvas.addEventListener('touchend', () => canvas.dispatchEvent(new MouseEvent('mouseup')));
+}
+
+function toggleTool(tool) {
+    if (currentTool === tool) { currentTool = null; } else { currentTool = tool; }
+    document.getElementById('brushBtn').classList.toggle('active', currentTool === 'brush');
+    document.getElementById('eraserBtn').classList.toggle('active', currentTool === 'eraser');
+    document.getElementById('textBtn').classList.toggle('active', currentTool === 'text');
+    document.getElementById('textTools').style.display = currentTool === 'text' ? 'flex' : 'none';
+    if (currentTool === 'brush') brushColor = document.getElementById('brushColor').value;
+    if (currentTool === 'eraser') brushColor = '#FFFFFF';
+    cancelTextPlacement();
+}
+
+function getCanvasPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: (e.clientX - rect.left) * canvas.width / rect.width,
+        y: (e.clientY - rect.top) * canvas.height / rect.height
+    };
+}
+
+function onCanvasDown(e) {
+    if (!currentTool) return;
+    if (currentTool === 'text') return;
+    painting = true;
+    lastX = lastY = 0;
+    drawDot(e);
+}
+
+function onCanvasMove(e) {
+    if (!painting) return;
+    drawLine(e);
+}
+
+function onCanvasUp() {
+    painting = false; lastX = 0; lastY = 0;
+}
+
+function drawDot(e) {
+    const p = getCanvasPos(e);
+    ctx.fillStyle = brushColor;
+    ctx.fillRect(p.x, p.y, brushSize, brushSize);
+    lineSegments.push({type: 'dot', x: p.x, y: p.y, color: brushColor, size: brushSize});
+    lastX = p.x; lastY = p.y;
+}
+
+function drawLine(e) {
+    const p = getCanvasPos(e);
+    ctx.strokeStyle = brushColor;
+    ctx.lineWidth = brushSize;
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.beginPath();
+    if (lastX === 0 && lastY === 0) { ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + .1, p.y + .1); }
+    else { ctx.moveTo(lastX, lastY); ctx.lineTo(p.x, p.y); }
+    ctx.stroke();
+    lineSegments.push({type: 'line', x1: lastX || p.x, y1: lastY || p.y, x2: p.x, y2: p.y, color: brushColor, size: brushSize});
+    lastX = p.x; lastY = p.y;
+}
+
+function onCanvasClick(e) {
+    if (currentTool === 'text' && isTextMode) placeText(e);
+}
+
+function startTextPlacement() {
+    const text = document.getElementById('textInput').value.trim();
+    if (!text) return;
+    isTextMode = true;
+    document.getElementById('canvasTitle').textContent = '点击画布放置文字';
+    canvas.style.borderColor = 'var(--primary-color)';
+}
+
+function cancelTextPlacement() {
+    isTextMode = false;
+    document.getElementById('canvasTitle').textContent = '';
+    canvas.style.borderColor = '';
+}
+
+function placeText(e) {
+    const p = getCanvasPos(e);
+    const ff = document.getElementById('fontFamily').value;
+    const fs = document.getElementById('fontSize').value;
+    let font = '';
+    if (textItalic) font += 'italic ';
+    if (textBold) font += 'bold ';
+    font += fs + 'px ' + ff;
+
+    const text = document.getElementById('textInput').value;
+    ctx.font = font;
+    ctx.fillStyle = brushColor;
+    ctx.fillText(text, p.x, p.y);
+
+    textElements.push({text, x: p.x, y: p.y, font, color: brushColor});
+    document.getElementById('textInput').value = '';
+    cancelTextPlacement();
+}
+
+function redrawLineSegments() {
+    lineSegments.forEach(s => {
+        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.strokeStyle = s.color; ctx.lineWidth = s.size;
+        ctx.beginPath();
+        if (s.type === 'dot') { ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + .1, s.y + .1); }
+        else { ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); }
+        ctx.stroke();
+    });
+}
+
+function redrawTextElements() {
+    textElements.forEach(t => {
+        ctx.font = t.font; ctx.fillStyle = t.color;
+        ctx.fillText(t.text, t.x, t.y);
+    });
+}
+
+function clearCanvas() {
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    lineSegments = []; textElements = [];
+}
+
+// ============================================================
+// 时钟对时
+// ============================================================
+async function syncTime() {
+    const now = new Date();
+    const year_lo = now.getFullYear() - 2000;
+    const ms = now.getMilliseconds();
+    const data = new Uint8Array([
+        CMD.SET_TIME,
+        year_lo,
+        now.getMonth() + 1, now.getDate(),
+        now.getHours(), now.getMinutes(), now.getSeconds(),
+        (ms >> 8) & 0xFF, ms & 0xFF
+    ]);
+    addLog('同步时间: ' + now.toLocaleString('zh-CN') + '.' + String(ms).padStart(3,'0'));
+    await writeCmd(data);
+    const resp = await waitNotify(5000);
+    if (resp && resp[0] === CMD.SET_TIME) {
+        addLog('时间同步成功');
+    } else {
+        addLog('时间同步失败: 未收到确认');
+    }
+}
+
+async function getTime() {
+    addLog('读取设备时间...');
+    await writeCmd(CMD.GET_TIME);
+    const resp = await waitNotify(5000);
+    if (resp && resp[0] === CMD.GET_TIME && resp.length >= 9) {
+        const year = 2000 + resp[1];
+        const ms = (resp[7] << 8) | resp[8];
+        const t = year + '-' +
+            String(resp[2]).padStart(2,'0') + '-' +
+            String(resp[3]).padStart(2,'0') + ' ' +
+            String(resp[4]).padStart(2,'0') + ':' +
+            String(resp[5]).padStart(2,'0') + ':' +
+            String(resp[6]).padStart(2,'0') + '.' +
+            String(ms).padStart(3,'0');
+        document.getElementById('deviceTime').textContent = t;
+        addLog('设备时间: ' + t);
+    } else {
+        document.getElementById('deviceTime').textContent = '读取失败';
+        addLog('读取时间超时');
+    }
+}
+
+async function switchFace() {
+    addLog('切换表盘...');
+    await writeCmd(CMD.SWITCH_FACE);
+    const resp = await waitNotify(5000);
+    if (resp && resp[0] === CMD.SWITCH_FACE && resp.length >= 2) {
+        const name = resp[1] === 1 ? '7段LED' : '点阵';
+        document.getElementById('faceName').textContent = name;
+        addLog('表盘切换为: ' + name);
+    } else {
+        addLog('切换表盘超时');
+    }
+}
+
+// ============================================================
+// 日志/状态
+// ============================================================
+function addLog(text, action = '') {
+    const log = document.getElementById('log');
+    const now = new Date();
+    const time = [now.getHours(), now.getMinutes(), now.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
+    const div = document.createElement('div');
+    div.innerHTML = '<span class="time">' + time + '</span>' +
+        (action ? '<span class="action">' + action + '</span>' : '') + text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    while (log.childNodes.length > 50) log.removeChild(log.firstChild);
+}
+
+function clearLog() { document.getElementById('log').innerHTML = ''; }
+function setStatus(t) { document.getElementById('status').textContent = t; }
+function setProgress(pct) { document.getElementById('progressFill').style.width = pct + '%'; }
+
+// ============================================================
+// 工具函数
+// ============================================================
+function bytes2hex(data) {
+    return new Uint8Array(data).reduce((s, b) => s + ('0' + b.toString(16)).slice(-2), '');
+}
+function hex2bytes(hex) {
+    const bytes = [];
+    for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+    return new Uint8Array(bytes);
+}
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ============================================================
+// 开发模式
+// ============================================================
+function checkDebug() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const debug = urlParams.get('debug');
+    const link = document.getElementById('debugToggle');
+    if (debug === 'true') {
+        document.body.classList.add('debug-mode');
+        link.textContent = '正常模式';
+        link.href = window.location.pathname;
+    }
+}
+
+// ============================================================
+// 初始化
+// ============================================================
+window.onload = () => {
+    canvas = document.getElementById('canvas');
+    ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    initPaint();
+    updateButtons();
+    checkDebug();
+};
+</script>
+</body>
+</html>
