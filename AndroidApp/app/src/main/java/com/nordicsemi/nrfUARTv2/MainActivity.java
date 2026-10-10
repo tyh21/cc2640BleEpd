@@ -314,6 +314,14 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
         btnStartDownload.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 epdDownloader.start();
+                // 按协商到的 MTU 决定一次带多少字节: 帧 = 3 头 + 数据, 必须
+                // 放得进一个 ATT 写 (<= MTU-3)。MTU=23 时退化成每帧 17 字节。
+                int mtu = (mService != null) ? mService.getMtu() : 23;
+                int chunk = mtu - 6;
+                if (chunk < 16) chunk = 16;
+                if (chunk > 128) chunk = 128;
+                epdDownloader.setChunkSize(chunk);
+                Log.i(TAG, "download start, mtu=" + mtu + ", chunk=" + chunk);
                 byte[] value = new byte[1];
                 value[0] = EpdDownloader.EPD_CMD_READ_VERSION;
                 sendMcuRequest(value);
@@ -828,23 +836,41 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 sendMcuRequest(buf);
                 break;
             case EpdDownloader.EPD_CMD_PREPARE_BLK_RAM:
-            case EpdDownloader.EPD_CMD_WRITE_BLK_RAM:
+            case EpdDownloader.EPD_CMD_WRITE_BLK_RAM_BULK:
                 if (epdDownloader.isDataFinish()) {
-                    Log.d(TAG, "black data finish");
+                    Log.d(TAG, "black data finish, verify CRC");
                     buf = new byte[1];
-                    buf[0] = EpdDownloader.EPD_CMD_UPDATE_DISPLAY;
+                    buf[0] = EpdDownloader.EPD_CMD_GET_BLK_RAM_CRC;
                     sendMcuRequest(buf);
                 } else {
-                    byte[] ram_data = epdDownloader.getNextFrame();
-                    buf = new byte[1 + epdDownloader.FRAME_DATA_SIZE];
-                    buf[0] = EpdDownloader.EPD_CMD_WRITE_BLK_RAM;
-                    for (int i = 0; i < epdDownloader.FRAME_DATA_SIZE; i++) {
-                        buf[1 + i] = ram_data[i];
+                    byte[] bulk = epdDownloader.buildNextBulkFrame();
+                    if (bulk != null) {
+                        sendMcuRequest(bulk);
                     }
-                    Log.i(TAG, "sending write ram command: " + bytesToHexString(buf));
-                    sendMcuRequest(buf);
                     int progress = epdDownloader.getProgress();
                     textViewDownloadInfo.setText("writing " + String.valueOf(progress) + " %");
+                }
+                break;
+
+            case EpdDownloader.EPD_CMD_GET_BLK_RAM_CRC:
+                if (frame.length >= 3) {
+                    int devCrc  = ((frame[1] & 0xFF) << 8) | (frame[2] & 0xFF);
+                    int hostCrc = epdDownloader.computeBlkCrc();
+                    if (devCrc == hostCrc) {
+                        Log.i(TAG, "image CRC ok: 0x" + Integer.toHexString(hostCrc));
+                        textViewDownloadInfo.setText("check ok, updating display...");
+                        buf = new byte[1];
+                        buf[0] = EpdDownloader.EPD_CMD_UPDATE_DISPLAY;
+                        sendMcuRequest(buf);
+                    } else {
+                        Log.w(TAG, "image CRC mismatch dev=0x" + Integer.toHexString(devCrc)
+                                + " host=0x" + Integer.toHexString(hostCrc));
+                        textViewDownloadInfo.setText("CRC mismatch, please retry");
+                        Toast.makeText(MainActivity.this, "图片校验失败，请重新下发",
+                                Toast.LENGTH_LONG).show();
+                    }
+                } else {
+                    textViewDownloadInfo.setText("CRC read failed");
                 }
                 break;
 

@@ -30,5 +30,26 @@ The target folder contains pin configs for the device.
 
 
 
+## Command-line build (scripts at repo root)
+Firmware (IAR):
+    set IAR_PATH=C:\Program Files (x86)\IAR Systems\Embedded Workbench 8.0
+    build_fw.bat v7            -> out\BleEpd_fw_v7.hex  (+ .out)
+Android app (Gradle):
+    build_app.bat v33          -> out\BleEpd_app_v33.apk
+Both:
+    build_all.bat v7 v33
+
+* build_fw.bat runs IarBuild.exe on two projects and copies artifacts into out\:
+      stack\cc2640r2lp_stack.ewp   -build FlashROM_Library
+      app\cc2640r2lp_app.ewp       -build FlashROM_StackLibrary
+  Both get -varfile ...5.14_advance_peripheral_uarttrans.custom_argvars
+  (that file supplies SIMPLELINK_CORE_SDK_INSTALL_DIR / SRC_BLE_DIR / ...).
+* IarBuild.exe is auto-detected under common install paths, or set IAR_PATH.
+* Requires the TI SDK at C:\ti\simplelink_cc2640r2_sdk_1_40_00_45
+  and xdctools_3_50_02_20_core at C:\ti\xdctools_3_50_02_20_core.
+* Verified building with IAR Command Line Build Utility V8.0.15.5379.
+* build_app.bat auto-picks a JDK if JAVA_HOME is unset or wrongly points at a \bin
+  subfolder (it falls back to Android Studio's bundled jbr).
+
 ## to improve
 * currently CC2640R2's low power consumption is not considered, so use with care on battery

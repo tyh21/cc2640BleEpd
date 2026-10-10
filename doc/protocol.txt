@@ -1,5 +1,71 @@
-a simple protocol is used to send image data to the device via BLE.
+CC2640R2 电子价签 BLE 协议  (firmware v0.3)
+==========================================
 
-* Android app send each frame contains one command with zero or frameLength bytes data
-* CC2640R2 will reply with the same command back, but no data payload (may add later)
+传输层
+------
+* 自定义 GATT 服务: f000fff0-0451-4000-b000-000000000000
+* 特征:            f000fff1-0451-4000-b000-000000000000
+                  属性 = WRITE_NO_RSP | NOTIFY
+  - 手机 -> 设备 : 写入命令 / 数据帧
+  - 设备 -> 手机 : 以 NOTIFY 回显同一个命令作为应答 (ACK)
 
+通用帧格式
+----------
+    [cmd(1B)][payload...]
+设备对请求的应答 = 回显 cmd(1B); 部分命令带 payload (见下)。
+
+命令表
+------
+0x10 PING
+0x11 INIT                  初始化面板
+0x12 DEINIT                休眠 (SleepLight, 面板可随时再唤醒)
+0x13 PREPARE_BLK_RAM       清 B/W RAM 为白; 同时复位整图 CRC
+0x14 WRITE_BLK_RAM         顺序写 (旧路径, 1 帧 = 16B; 兼容保留)
+0x15 GET_BLK_RAM_CRC       读整图 CRC -> [0x15][crc_hi][crc_lo]
+0x16 WRITE_BLK_RAM_BULK    多行块写 -> [off_hi][off_lo][data...]  (新, 推荐)
+0x18 PREPARE_RED_RAM       红色 RAM (未实现)
+0x19 WRITE_RED_RAM         红色 RAM (未实现)
+0x21 UPDATE_DISPLAY        刷新显示 (成功后固件自动切图片模式)
+0x22 READ_VERSION          -> [0x22][major][minor]
+0x30 CLEAR  0x31 CHECKERBOARD  0x32 ALL_BLACK
+0x40 LED_TEST  0x41 LED_TOGGLE
+0x50 SET_TIME  0x51 GET_TIME
+0x60 SWITCH_FACE
+0x70 SET_MODE  0x71 GET_MODE
+
+快速传图 (0x16) —— 本次优化 (P0-2)
+----------------------------------
+旧路径: 每行一帧 (16B), 共 212 帧 = 212 次往返。
+新路径: 一次带多行, 约 27~29 次往返, 传图阶段快 ~8 倍。
+
+流程:
+    READ_VERSION        (0x22)
+    INIT                (0x11)
+    PREPARE_BLK_RAM     (0x13)   // 复位整图 CRC
+    循环 WRITE_BLK_RAM_BULK (0x16)   // 每块带偏移, 等 ACK 再发下一块 (流控)
+    GET_BLK_RAM_CRC     (0x15)   // 与手机本地 CRC 比对
+    UPDATE_DISPLAY      (0x21)
+    DEINIT              (0x12)
+
+块写
+----
+    frame = [0x16][off_hi][off_lo][data...]
+    off   = 行号 * 16, 范围 0..3391 (212 行 x 16B; 每行 13B 像素 + 3B 填充)
+    驱动每次调用都重新装载 RAM 地址计数器, 所以同一块到达两次只是重写同样的
+    单元, 不会错位 (对重传友好)。
+    块大小受 ATT MTU 限制: 3 + chunk <= MTU-3;
+    固件接收缓冲 EPD_RX_FRAME_LEN = 160, 故 chunk <= 157; 客户端一般取 120~128。
+
+CRC
+---
+    CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, 不反转, 无输出异或。
+    标准校验值: CRC("123456789") = 0x29B1  (可用于核对各端实现)
+    固件在 0x16 路径按写入先后累积; 手机对整幅缓冲一次性计算。
+    ⚠ 只有"顺序发送、不重发"时两者才相等;
+      因此重发整图前必须先重新 PREPARE_BLK_RAM (复位 CRC)。
+
+MTU
+---
+    Android 连接后主动 requestMtu(247); 固件侧 MAX_PDU_SIZE 上限决定实际值。
+    协商失败时 MTU 退回 23, 客户端块大小自动缩到 17B, 仍能工作 (只是慢)。
+    实测/预期: MTU 135 -> chunk 128 -> 约 27 次往返。

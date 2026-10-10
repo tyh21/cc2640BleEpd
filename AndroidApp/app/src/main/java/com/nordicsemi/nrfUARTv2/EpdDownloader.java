@@ -38,6 +38,7 @@ public class EpdDownloader {
     public final static byte EPD_CMD_PREPARE_BLK_RAM = 0x13;
     public final static byte EPD_CMD_WRITE_BLK_RAM = 0x14;
     public final static byte EPD_CMD_GET_BLK_RAM_CRC = 0x15;
+    public final static byte EPD_CMD_WRITE_BLK_RAM_BULK = 0x16;  // 多行块写: [0x16][off_hi][off_lo][data...]
     public final static byte EPD_CMD_PREPARE_RED_RAM = 0x18;
     public final static byte EPD_CMD_WRITE_RED_RAM = 0x19;
     public final static byte EPD_CMD_GET_RED_RAM_CRC = 0x20;
@@ -152,24 +153,55 @@ public class EpdDownloader {
         }
     }
 
+    // ---- 快速路径: 多行块写 (0x16) ----
+    // 一次发送 chunkSize 字节(可跨多行), 用 2 字节大端偏移定位到 4000B RAM 窗口。
+    // 相比"每行一帧"(212 次往返), 现在约 27 次, 传图快 8 倍。
+    private int byteOffset = 0;
+    private int chunkSize = 120;   // 会被 setChunkSize() 按协商 MTU 调整
+
+    public void setChunkSize(int n) {
+        if (n < 16) n = 16;
+        if (n > 128) n = 128;      // 固件 RX 帧缓冲 160B (3 头 + 最多 157 数据)
+        chunkSize = n;
+    }
+
     public void start() {
-        frame_index_black = 0;
+        byteOffset = 0;
     }
 
     public boolean isDataFinish() {
-        return frame_index_black >= TOTAL_FRAME_COUNT;
+        return byteOffset >= black_buf.length;
     }
 
     public int getProgress() {
-        if (frame_index_black >= TOTAL_FRAME_COUNT) return 100;
-        return (frame_index_black * 100 / TOTAL_FRAME_COUNT);
+        if (byteOffset >= black_buf.length) return 100;
+        return (byteOffset * 100 / black_buf.length);
     }
 
-    public byte[] getNextFrame() {
-        byte[] ret = new byte[FRAME_DATA_SIZE];
-        System.arraycopy(black_buf, FRAME_DATA_SIZE * frame_index_black, ret, 0, FRAME_DATA_SIZE);
-        frame_index_black++;
-        return ret;
+    /** 组装下一个块: [0x16][off_hi][off_lo][data...], 并推进偏移 */
+    public byte[] buildNextBulkFrame() {
+        if (isDataFinish()) return null;
+        int len = Math.min(chunkSize, black_buf.length - byteOffset);
+        byte[] f = new byte[3 + len];
+        f[0] = EPD_CMD_WRITE_BLK_RAM_BULK;
+        f[1] = (byte) ((byteOffset >> 8) & 0xFF);
+        f[2] = (byte) (byteOffset & 0xFF);
+        System.arraycopy(black_buf, byteOffset, f, 3, len);
+        byteOffset += len;
+        return f;
+    }
+
+    /** 整图 CRC-16/CCITT-FALSE, 与固件 s_blk_crc 使用同一算法 */
+    public int computeBlkCrc() {
+        int crc = 0xFFFF;
+        for (int i = 0; i < black_buf.length; i++) {
+            crc ^= ((black_buf[i] & 0xFF) << 8);
+            for (int b = 0; b < 8; b++) {
+                if ((crc & 0x8000) != 0) crc = ((crc << 1) ^ 0x1021) & 0xFFFF;
+                else crc = (crc << 1) & 0xFFFF;
+            }
+        }
+        return crc & 0xFFFF;
     }
 
     private static String bytesToHexString(byte[] src) {

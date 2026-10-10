@@ -33,6 +33,7 @@ CMD_DEINIT           = 0x12
 CMD_PREPARE_BLK_RAM  = 0x13
 CMD_WRITE_BLK_RAM    = 0x14
 CMD_GET_BLK_RAM_CRC  = 0x15
+CMD_WRITE_BLK_BULK   = 0x16   # 多行块写: [0x16][off_hi][off_lo][data...]
 CMD_PREPARE_RED_RAM  = 0x18
 CMD_WRITE_RED_RAM    = 0x19
 CMD_GET_RED_RAM_CRC  = 0x20
@@ -53,6 +54,18 @@ EPD_HEIGHT = 212   # 像素
 EPD_BUF_SIZE = EPD_WIDTH // 8 * EPD_HEIGHT  # 2756 字节 (212行×13字节)
 FRAME_DATA_SIZE = 16  # 每帧16字节(13字节数据+3字节0xFF填充), 对齐SSD1680 RAM行宽
 TOTAL_FRAME_COUNT = EPD_BUF_SIZE // 13  # 212 帧 (每帧=1行16字节)
+
+
+def crc16_ccitt(data: bytes, crc: int = 0xFFFF) -> int:
+    """CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF), 与固件 s_blk_crc 一致。"""
+    for b in data:
+        crc ^= (b & 0xFF) << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc & 0xFFFF
 
 
 # ============================================================
@@ -169,6 +182,7 @@ class BleEpdClient:
     def __init__(self):
         self.client: BleakClient | None = None
         self.connected = False
+        self.mtu = 23          # 协商到的 ATT MTU (23 = BLE 最小)
         self._notify_queue: asyncio.Queue = asyncio.Queue()
 
     async def scan(self, timeout: float = 5.0) -> list[tuple[str, str]]:
@@ -186,6 +200,8 @@ class BleEpdClient:
         try:
             await self.client.connect()
             self.connected = True
+            # bleak 暴露协商后的 MTU (部分平台/版本没有此属性, 回退到最小值)
+            self.mtu = getattr(self.client, "mtu_size", 23)
             # 开启 Notify
             await self.client.start_notify(CHAR_UUID, self._on_notify)
             return True
@@ -249,6 +265,15 @@ class EpdDownloader:
         if self.on_progress:
             self.on_progress(state, progress, msg)
 
+    def _chunk_size(self) -> int:
+        """一次多行块写带多少字节: 帧 = 3 头 + 数据 <= MTU-3, 固件缓冲上限 160。"""
+        c = self.ble.mtu - 6
+        if c < 16:
+            c = 16
+        if c > 128:
+            c = 128
+        return c
+
     async def download(self):
         """执行完整下载流程 (与 Android App 一致)"""
         self.frame_idx_black = 0
@@ -272,7 +297,7 @@ class EpdDownloader:
             self._report("error", 0, "Init 超时")
             return False
 
-        # 3. 写黑图 RAM
+        # 3. 写黑图 RAM (多行块写: 一次 chunk 字节, 往返从 212 降到 ~27)
         self._report("black", 5, "写入黑图数据...")
         await self.ble.write(bytes([CMD_PREPARE_BLK_RAM]))
         resp = await self.ble.read_notify(timeout=5)
@@ -280,15 +305,35 @@ class EpdDownloader:
             self._report("error", 0, "PrepareBlkRAM 超时")
             return False
 
-        for i in range(TOTAL_FRAME_COUNT):
-            frame = self.image.get_frame(i)
-            await self.ble.write(bytes([CMD_WRITE_BLK_RAM]) + frame)
+        buf = bytes(self.image.black_buf)
+        total = len(buf)
+        chunk = self._chunk_size()
+        off = 0
+        crc = 0xFFFF
+        while off < total:
+            seg = buf[off:off + chunk]
+            frame = bytes([CMD_WRITE_BLK_BULK, (off >> 8) & 0xFF, off & 0xFF]) + seg
+            await self.ble.write(frame)
             resp = await self.ble.read_notify(timeout=5)
             if not resp:
-                self._report("error", 0, f"WriteBlkRAM 帧{i} 超时")
+                self._report("error", 0, f"WriteBlkRAM 块@{off} 超时")
                 return False
-            pct = 5 + int(i / TOTAL_FRAME_COUNT * 80)
-            self._report("black", pct, f"写入黑图 {i+1}/{TOTAL_FRAME_COUNT}")
+            crc = crc16_ccitt(seg, crc)
+            off += len(seg)
+            pct = 5 + int(off / total * 80)
+            self._report("black", pct, f"写入黑图 {off}/{total}")
+
+        # 3b. 整图校验 (与固件累积的 CRC 比对)
+        await self.ble.write(bytes([CMD_GET_BLK_RAM_CRC]))
+        resp = await self.ble.read_notify(timeout=5)
+        if resp and resp[0] == CMD_GET_BLK_RAM_CRC and len(resp) >= 3:
+            dev = (resp[1] << 8) | resp[2]
+            if dev != crc:
+                self._report("error", 0, f"校验失败 dev=0x{dev:04X} host=0x{crc:04X}")
+                return False
+            self._report("black", 86, "校验通过")
+        else:
+            self._report("black", 86, "校验无响应, 跳过")
 
         # 4. Update
         self._report("update", 88, "刷新显示...")

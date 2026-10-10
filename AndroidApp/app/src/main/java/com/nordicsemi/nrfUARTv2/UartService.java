@@ -50,6 +50,14 @@ public class UartService extends Service {
     private BluetoothGatt mBluetoothGatt;
     private int mConnectionState = STATE_DISCONNECTED;
 
+    // 协商到的 ATT MTU。默认 23 (BLE 最小), 连接后主动请求更大值, 否则
+    // 一次写只能带 20 字节, 传图要 212 次往返。BLE 回调线程写、UI 线程读。
+    private volatile int mMtu = 23;
+
+    public int getMtu() {
+        return mMtu;
+    }
+
     private static final int STATE_DISCONNECTED = 0;
     private static final int STATE_CONNECTING = 1;
     private static final int STATE_CONNECTED = 2;
@@ -108,10 +116,26 @@ public class UartService extends Service {
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
             	Log.w(TAG, "mBluetoothGatt = " + mBluetoothGatt );
-            	
+                // 请求更大的 ATT MTU, 让传图一次能带多行。协商结果在
+                // onMtuChanged 里回来; 失败则保持默认 23。
+                try {
+                    mBluetoothGatt.requestMtu(247);
+                } catch (SecurityException e) {
+                    Log.w(TAG, "requestMtu denied: " + e.getMessage());
+                }
                 broadcastUpdate(ACTION_GATT_SERVICES_DISCOVERED);
             } else {
                 Log.w(TAG, "onServicesDiscovered received: " + status);
+            }
+        }
+
+        @Override
+        public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                mMtu = mtu;
+                Log.i(TAG, "MTU negotiated: " + mtu);
+            } else {
+                Log.w(TAG, "MTU request failed status=" + status + ", keep " + mMtu);
             }
         }
 

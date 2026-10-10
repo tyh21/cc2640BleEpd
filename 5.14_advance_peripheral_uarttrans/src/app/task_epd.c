@@ -31,7 +31,7 @@
 #include "util.h"
 
 uint8_t VERSION_MAJOR = 0;
-uint8_t VERSION_MINOR = 2;
+uint8_t VERSION_MINOR = 3;   /* 0.3: + 0x16 多行块写 + 0x15 整图 CRC 校验 */
 
  
  
@@ -43,6 +43,7 @@ uint8_t VERSION_MINOR = 2;
    EPD_CMD_PREPARE_BLK_RAM = 0x13,
    EPD_CMD_WRITE_BLK_RAM = 0x14,
    EPD_CMD_GET_BLK_RAM_CRC = 0x15,
+   EPD_CMD_WRITE_BLK_RAM_BULK = 0x16,  // 多行块写: [off_hi][off_lo][data...]
    
    EPD_CMD_PREPARE_RED_RAM = 0x18,
    EPD_CMD_WRITE_RED_RAM = 0x19,
@@ -96,6 +97,23 @@ static uint8_t epd_resp_frame[11];
 uint8_t resp_fram_len = 1;
 
 EpdResponseCallback respCallback = NULL;
+
+/* CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, 不反转/不异或输出),
+ * 累积在"多行块写"(0x16) 写入的每一个字节上, 手机可用 0x15 读回校验
+ * 面板 RAM 到底收到了什么. 每次 PrepareBlkRAM 重新开始.
+ * 只在顺序发送时成立(正常路径就是顺序发), 重发整图会重置. */
+static uint16_t s_blk_crc = 0xFFFFu;
+
+static uint16_t crc16_update(uint16_t crc, uint8_t b)
+{
+    uint8_t i;
+    crc ^= (uint16_t)b << 8;
+    for (i = 0; i < 8u; i++) {
+        crc = (crc & 0x8000u) ? (uint16_t)((crc << 1) ^ 0x1021u)
+                              : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
 
 // Event used to control the EPD thread
 Event_Struct EPDEvent;
@@ -281,6 +299,7 @@ void handle_cmd()
     case EPD_CMD_PREPARE_BLK_RAM:
     HWUART_Printf("prep blk ram\r\n");
     s_img_transfer_active = 1;
+    s_blk_crc = 0xFFFFu;   /* 新一轮图像: 复位整图校验 */
     #ifndef EPD_DRY_RUN
    EPD_2IN13_PrepareBlkRAM();
 #endif
@@ -291,6 +310,33 @@ void handle_cmd()
  #ifndef EPD_DRY_RUN
    EPD_2IN13_WriteRAM(epd_rx_frame + 1, rx_fram_len - 1);
 #endif
+    break;
+
+    case EPD_CMD_WRITE_BLK_RAM_BULK:
+    /* 多行块写 (快速路径): [0x16][off_hi][off_lo][data...]
+     * off = 4000 字节 B/W RAM 窗口内的字节偏移 (行号*16). 驱动每次调用都会
+     * 重新装载 RAM 地址计数器, 所以同一个块即使到达两次也只是重写同样的
+     * 单元, 不会把图像错位. 一帧数据覆盖多行, 往返次数从 212 降到 ~27. */
+    if (rx_fram_len >= 3) {
+        uint16_t off = (uint16_t)(((uint16_t)epd_rx_frame[1] << 8) |
+                                   (uint16_t)epd_rx_frame[2]);
+        uint16_t n   = (uint16_t)(rx_fram_len - 3);
+        uint16_t i;
+#ifndef EPD_DRY_RUN
+        EPD_2IN13_WriteRAMAt((uint32_t)off, epd_rx_frame + 3, (int)n);
+#endif
+        for (i = 0; i < n; i++) {
+            s_blk_crc = crc16_update(s_blk_crc, epd_rx_frame[3 + i]);
+        }
+    }
+    // resp_fram_len 默认 1 -> 回显 0x16 作为 ACK (流控)
+    break;
+
+    case EPD_CMD_GET_BLK_RAM_CRC:
+    HWUART_Printf("get blk crc\r\n");
+    resp_fram_len = 3;
+    epd_resp_frame[1] = (uint8_t)(s_blk_crc >> 8);
+    epd_resp_frame[2] = (uint8_t)(s_blk_crc & 0xFFu);
     break;
     
         case EPD_CMD_PREPARE_RED_RAM:

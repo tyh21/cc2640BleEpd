@@ -281,6 +281,7 @@ const CHAR_UUID    = 'f000fff1-0451-4000-b000-000000000000';
 const CMD = {
     INIT: 0x11, DEINIT: 0x12,
     PREP_BLK: 0x13, WRITE_BLK: 0x14,
+    GET_BLK_CRC: 0x15, WRITE_BLK_BULK: 0x16,
     PREP_RED: 0x18, WRITE_RED: 0x19,
     UPDATE: 0x21, READ_VER: 0x22,
     CLEAR: 0x30, TEST: 0x31, ALLBLACK: 0x32,
@@ -499,16 +500,43 @@ async function sendImage() {
     await waitNotify();
     await delay(20);
 
-    // 黑图分帧 (212行×16字节=3392字节, 每帧16字节=1行, 共212帧)
+    // 黑图分块 (212行×16字节=3392字节)。
+    // 每块 = [0x16][off_hi][off_lo][data...], 一次带多行, 往返从 212 降到 ~29。
     const bwData = canvas2ram(canvas);
-    for (let i = 0; i < TOTAL_FRAMES; i++) {
-        const frame = bwData.slice(i * FRAME_SIZE, (i + 1) * FRAME_SIZE);
-        const payload = [CMD.WRITE_BLK, ...frame];
-        await writeCmd(payload, false);  // write without response, 不等BLE ACK
-        await waitNotify();  // 等固件Notify回复再发下一帧
-        const pct = 5 + Math.round(i / TOTAL_FRAMES * 80);
+    const CHUNK = 120;                 // 一次块写字节数 (Chrome Web Bluetooth MTU 够用)
+    let off = 0;
+    let crc = 0xFFFF;
+    while (off < bwData.length) {
+        const n = Math.min(CHUNK, bwData.length - off);
+        const payload = new Uint8Array(3 + n);
+        payload[0] = CMD.WRITE_BLK_BULK;
+        payload[1] = (off >> 8) & 0xFF;
+        payload[2] = off & 0xFF;
+        for (let i = 0; i < n; i++) {
+            payload[3 + i] = bwData[off + i];
+            crc = crc16Update(crc, bwData[off + i]);
+        }
+        await writeCmd(payload, false);   // write without response
+        await waitNotify();               // 等固件 ACK (0x16) 再发下一块
+        off += n;
+        const pct = 5 + Math.round(off / bwData.length * 80);
         setProgress(pct);
-        setStatus('写入黑图 ' + (i+1) + '/' + TOTAL_FRAMES);
+        setStatus('写入黑图 ' + Math.min(off, bwData.length) + '/' + bwData.length);
+    }
+
+    // 整图校验: 固件按块累积的 CRC 必须与本地一致, 否则中止不刷新
+    await writeCmd(CMD.GET_BLK_CRC);
+    const crcResp = await waitResp(CMD.GET_BLK_CRC, 5000);
+    if (crcResp && crcResp.length >= 3) {
+        const devCrc = (crcResp[1] << 8) | crcResp[2];
+        if (devCrc !== crc) {
+            setStatus('校验失败: dev=0x' + devCrc.toString(16) + ' host=0x' + crc.toString(16));
+            addLog('图片校验失败，已中止（未刷新）');
+            return;
+        }
+        addLog('图片校验通过 CRC=0x' + crc.toString(16));
+    } else {
+        addLog('校验无响应，跳过');
     }
 
     // 刷新显示
@@ -1024,6 +1052,15 @@ function setProgress(pct) { document.getElementById('progressFill').style.width 
 // ============================================================
 function bytes2hex(data) {
     return new Uint8Array(data).reduce((s, b) => s + ('0' + b.toString(16)).slice(-2), '');
+}
+// CRC-16/CCITT-FALSE, 与固件 task_epd.c::crc16_update 一致
+function crc16Update(crc, b) {
+    crc ^= (b & 0xFF) << 8;
+    for (let i = 0; i < 8; i++) {
+        crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+        crc &= 0xFFFF;
+    }
+    return crc;
 }
 function hex2bytes(hex) {
     const bytes = [];
