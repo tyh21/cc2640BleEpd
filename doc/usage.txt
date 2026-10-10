@@ -51,5 +51,28 @@ Both:
 * build_app.bat auto-picks a JDK if JAVA_HOME is unset or wrongly points at a \bin
   subfolder (it falls back to Android Studio's bundled jbr).
 
+## power (B1)
+* POWER_SAVING is now enabled (app .ewp define) and Power_init() is called in
+  main.c (the stock Board_init() had been replaced by a bare PIN_init(), so the
+  Power driver was never brought up and the device never entered STANDBY).
+* Policy: PowerCC26XX_standbyPolicy
+  (target/LAUNCHIOT_CC2640R2MOD_RGZ/LAUNCHIOT_CC2640R2MOD_RGZ.c).
+* Tunables (power vs. responsiveness):
+    NFC_POLL_MS                    nfc_esl.c, default 1 ms; raise to cut idle wake-ups
+    DEFAULT_ADVERTISING_INTERVAL   peripheral_uarttrans.c, 160 = 100 ms
+    DEFAULT_DESIRED_(MIN|MAX)_CONN_INTERVAL  16 = 20 ms
+* NFC IRQ: the FM11NC08S IRQ_N (active low) is wired to DIO_13.  The NFC task
+  arms a falling-edge interrupt on it and sleeps in Event_pend; the poll is
+  only a fallback.  NFC_FALLBACK_MS (nfc_esl.c, default 200 ms) is the tunable.
+  Verified on hardware: the chip asserts IRQ_N by default, so no SYS_CTRL /
+  INT_MASK setup is needed (see doc/FM11NC08(1).pdf).
+  The loop's housekeeping timers (EPD_WAIT_MAX, IMG_HOLD_MAX, CH_STALL_SLOTS,
+  PANEL_RETRY_SLOTS, LOOP_IDLE_FLUSH, the busy-flag decay) are all in ms and
+  advance by real elapsed time, so NFC_FALLBACK_MS can be raised freely (0 =
+  IRQ-only, no periodic tick - but then that housekeeping stops).
+* Bench-check after flashing: idle current with no tap, tap responsiveness,
+  BLE connect/throughput, and that a tap right after a long idle still works.
+* To revert quickly: set the app .ewp define back to xPOWER_SAVING.
+
 ## to improve
 * currently CC2640R2's low power consumption is not considered, so use with care on battery

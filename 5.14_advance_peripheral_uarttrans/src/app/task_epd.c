@@ -31,7 +31,7 @@
 #include "util.h"
 
 uint8_t VERSION_MAJOR = 0;
-uint8_t VERSION_MINOR = 3;   /* 0.3: + 0x16 多行块写 + 0x15 整图 CRC 校验 */
+uint8_t VERSION_MINOR = 5;   /* 0.5: + NFC IRQ_N(DIO13) 中断唤醒 */
 
  
  

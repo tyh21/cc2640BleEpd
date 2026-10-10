@@ -51,6 +51,11 @@
 
 #include <ti/sysbios/knl/Task.h>
 #include <ti/sysbios/knl/Clock.h>
+#include <ti/sysbios/knl/Event.h>
+#include <ti/sysbios/BIOS.h>
+
+#include <ti/drivers/PIN.h>
+#include <ti/drivers/pin/PINCC26XX.h>
 
 #include <ti/devices/cc26x0r2/driverlib/ioc.h>
 #include <ti/devices/cc26x0r2/driverlib/gpio.h>
@@ -286,12 +291,14 @@ static uint8_t  s_redraw    = 0u;
 static uint32_t s_redraws   = 0u;
 static volatile uint8_t g_epd_busy = 0u;     /* 00 = idle, 01 = busy     */
 static uint8_t  s_epd_high  = 0u;
-static uint8_t  s_epd_low   = 0u;
+static uint32_t s_epd_low   = 0u;            /* ms seen with BUSY released */
 static uint32_t s_epd_wait  = 0u;
-#define EPD_WAIT_MAX     3000u               /* ~3 s with no BUSY edge   */
-#define IMG_HOLD_MAX    10000u               /* ~10 s to drop the hold   */
-#define CH_STALL_SLOTS    300u               /* ~300 ms mid-chain        */
-#define PANEL_RETRY_SLOTS 8000u              /* ~8 s between panel retries:
+/* These are all in MILLISECONDS: the loop accumulates elapsed ms (see
+ * nfc_now_ms / "slots"), so they keep their meaning at any poll period. */
+#define EPD_WAIT_MAX     3000u               /* 3 s with no BUSY edge    */
+#define IMG_HOLD_MAX    10000u               /* 10 s to drop the hold    */
+#define CH_STALL_SLOTS    300u               /* 300 ms mid-chain         */
+#define PANEL_RETRY_SLOTS 8000u              /* 8 s between panel retries:
                                               * an attempt itself costs up to
                                               * 2 s, so this keeps the
                                               * responder polling at least
@@ -615,14 +622,99 @@ static uint8_t panel_try_init(void)
  * keeping the BLE5 heap intact - see the note on LGMAX above. */
 #define NFC_TASK_PRIORITY    1
 #define NFC_TASK_STACK_SIZE  512
+/* Poll period of the bit-banged FM11NC08S.  1 ms keeps the responder inside the
+ * reader's 9.7 ms frame waiting time with comfortable margin.  Raising it (e.g.
+ * build with -DNFC_POLL_MS=2) halves the idle wake-ups at the cost of that
+ * margin - keep it well under 9 ms.  Overridable from the command line. */
+#ifndef NFC_POLL_MS
 #define NFC_POLL_MS          1u
-#define LOOP_IDLE_FLUSH      400u
+#endif
+#define LOOP_IDLE_FLUSH      400u   /* ms of quiet before flushing the log */
+
+/* ---- IRQ_N wake-up ----
+ * The FM11NC08S IRQ_N output (active low) is wired to DIO_13 on this board.
+ * A falling-edge interrupt on it wakes the responder the instant the chip has
+ * something -- VERIFIED ON HARDWARE (chip asserts IRQ_N by default, no
+ * SYS_CTRL/INT_MASK setup needed).  The poll below is therefore only a safety
+ * net for a missed edge: 20 ms keeps a responsive heartbeat while cutting the
+ * idle wake-ups ~20x.  Override with -DNFC_FALLBACK_MS=... */
+#ifndef NFC_IRQ_PIN
+#define NFC_IRQ_PIN          IOID_13
+#endif
+/* 0 = no fallback poll at all: the task blocks in Event_pend until IRQ_N wakes
+ * it.  Non-zero = also wake every NFC_FALLBACK_MS ms as a safety net AND to run
+ * the periodic housekeeping in the loop (g_nfc_busy decay, panel retry, log
+ * flush).  IRQ-only is the lowest idle power, but then that housekeeping never
+ * runs - g_nfc_busy would stick at 1 after the first tap and freeze the clock -
+ * so the default keeps a 20 ms housekeeping tick. */
+#ifndef NFC_FALLBACK_MS
+#define NFC_FALLBACK_MS      200u  /* IRQ wake + 200 ms housekeeping tick */
+#endif
+#define NFC_EVENT_IRQ        Event_Id_00
 
 static Task_Struct NfcTask;
 static Char NfcTaskStack[NFC_TASK_STACK_SIZE];
 
-/* idle slots spent with no image traffic before the clock hold is released */
+/* ms the current ISO14443 chain has been stalled (no frame) - resync once it
+ * passes CH_STALL_SLOTS */
 static uint32_t s_idle_cnt = 0u;
+
+/* ---- IRQ_N (DIO_13) wake-up plumbing ---- */
+static Event_Struct NfcEvent;
+static Event_Handle hNfcEvent = NULL;
+
+static PIN_State  irqPinState;
+static PIN_Handle irqPinHandle = NULL;
+
+static uint32_t s_irq_wakes = 0u;
+
+/* PIN driver interrupt callback.  Runs in Hwi context - do nothing but post. */
+static void nfc_irq_cb(PIN_Handle handle, PIN_Id pinId)
+{
+    (void)handle; (void)pinId;
+    if (hNfcEvent != NULL) {
+        Event_post(hNfcEvent, NFC_EVENT_IRQ);
+    }
+}
+
+/* Bring up the IRQ_N input.  If the pin cannot be opened we say so and carry
+ * on - the fallback poll still keeps the responder alive on its own. */
+static void nfc_irq_init(void)
+{
+    PIN_Config cfg[] = {
+        NFC_IRQ_PIN | PIN_INPUT_EN | PIN_PULLUP | PIN_HYSTERESIS | PIN_IRQ_NEGEDGE,
+        PIN_TERMINATE
+    };
+    Event_Params ep;
+
+    Event_Params_init(&ep);
+    Event_construct(&NfcEvent, &ep);
+    hNfcEvent = Event_handle(&NfcEvent);
+
+    irqPinHandle = PIN_open(&irqPinState, cfg);
+    if (irqPinHandle != NULL) {
+        PIN_registerIntCb(irqPinHandle, nfc_irq_cb);
+        PIN_setInterrupt(irqPinHandle, NFC_IRQ_PIN | PIN_IRQ_NEGEDGE);
+        HWUART_Printf("NFC IRQ_N armed on IOID_%u (falling edge)\r\n",
+                      (unsigned)NFC_IRQ_PIN);
+    } else {
+        HWUART_Printf("NFC IRQ_N pin open FAILED - poll only\r\n");
+    }
+}
+
+/* ---- real-time loop timing ----
+ * The loop spins at a variable rate (fast while an exchange is in progress,
+ * once every NFC_FALLBACK_MS when idle), so the housekeeping timers accumulate
+ * elapsed MILLISECONDS instead of counting iterations.  At the old 1 ms
+ * cadence one iteration was one millisecond, so this is the previous
+ * behaviour exactly; it lets the idle poll period be raised without stretching
+ * (and thus breaking) those timeouts. */
+static uint32_t s_loop_ms = 0u;
+
+static uint32_t nfc_now_ms(void)
+{
+    return (uint32_t)(Clock_getTicks() / (1000u / Clock_tickPeriod));
+}
 
 /* ICall's own free-heap counter, exported by icall.o.  Printing it at
  * start-up is the one number that tells us whether the BLE5 stack has
@@ -647,6 +739,7 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
      * Nothing below this point may depend on the panel: the responder has
      * to be able to answer a tap even if no panel is attached at all. */
     fm_pins_init();
+    nfc_irq_init();                       /* DIO_13 <- IRQ_N (falling)    */
     fm_reg_wr(0x01u, &one, 1);            /* FIFO_FLUSH                  */
     fm_delay(4000u);
 
@@ -670,12 +763,22 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
         lg_flush_all();
     }
 
+    s_loop_ms = nfc_now_ms();
+
     while (1) {
         uint8_t irq = 0u;
         uint8_t cnt = 0u;
+        uint32_t slots;
+        uint32_t now = nfc_now_ms();
+
+        /* housekeeping timers count elapsed ms, not iterations, so they keep
+         * their meaning whatever the idle poll period is */
+        slots = now - s_loop_ms;
+        s_loop_ms = now;
+        if (slots == 0u) slots = 1u;
 
         /* keep trying until the panel answers (every ~8 s of idle time) */
-        if (s_panel_ready == 0u && ++panel_retry > PANEL_RETRY_SLOTS) {
+        if (s_panel_ready == 0u && (panel_retry += slots) > PANEL_RETRY_SLOTS) {
             panel_retry = 0u;
             if (panel_try_init() != 0u) {
                 lg_s("panel ready now\r\n");
@@ -692,16 +795,16 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
                 idle = 0u;
                 g_nfc_busy = 1u;
             } else {
-                idle++;
+                idle += slots;
             }
         } else {
-            idle++;
+            idle += slots;
         }
 
         /* a chain must never wedge us: if the reader walks away mid-APDU,
          * drop the partial APDU and start clean */
         if (s_in_chain != 0u) {
-            if (++s_idle_cnt > CH_STALL_SLOTS) {
+            if ((s_idle_cnt += slots) > CH_STALL_SLOTS) {
                 s_in_chain = 0u; s_ch_n = 0u; s_ch_len = 0u; s_ch_live = 0u;
                 s_prev_blk = 0xFFu; s_idle_cnt = 0u;
                 lg_s("(chain stalled - resync)\r\n");
@@ -731,7 +834,7 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
                 s_epd_high = 1u;
                 s_epd_low  = 0u;
             } else if (s_epd_high != 0u) {
-                if (++s_epd_low >= 4u) {               /* debounce release */
+                if ((s_epd_low += slots) >= 4u) {      /* debounce release */
                     /* Lock the display into image mode BEFORE F0 DE is
                      * allowed to answer 00, so the app can never read
                      * "idle" while the panel is still clock-owned. */
@@ -753,7 +856,7 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
                         EPDTask_setImageTransfer(0);
                     }
                 }
-            } else if (++s_epd_wait > EPD_WAIT_MAX) {
+            } else if ((s_epd_wait += slots) > EPD_WAIT_MAX) {
                 g_epd_busy = 0u;                       /* no panel attached */
                 s_epd_wait = 0u;
                 /* BUSY never moved at all: the panel is absent, unpowered or
@@ -772,7 +875,7 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
         /* release the clock hold if the phone delivered packets but never
          * sent the redraw (aborted session) */
         if (s_img_hold != 0u && g_epd_busy == 0u) {
-            if (++s_img_idle > IMG_HOLD_MAX) {
+            if ((s_img_idle += slots) > IMG_HOLD_MAX) {
                 s_img_hold = 0u;
                 EPDTask_setImageTransfer(0);
                 lg_s("image hold released (no F0 D4)\r\n");
@@ -789,10 +892,25 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
          * the field goes quiet so it keeps meaning "something is happening" */
         if (idle > 5000u) g_nfc_busy = 0u;
 
-        /* one slot per millisecond: the reader's frame waiting time is
-         * 9.7 ms, so a 1 ms poll leaves plenty of room, and the task costs
-         * almost no CPU for the 99.9% of the time nobody is tapping. */
-        Task_sleep(NFC_POLL_MS * 1000u / Clock_tickPeriod);
+        /* Sleep until an IRQ_N edge (the chip has something).  With
+         * NFC_FALLBACK_MS == 0 there is no timeout at all - we block in
+         * Event_pend and only the interrupt wakes us (lowest idle power).
+         * A non-zero fallback also wakes periodically as a safety net. */
+        if (hNfcEvent != NULL) {
+            uint32_t to = (NFC_FALLBACK_MS == 0u)
+                        ? (uint32_t)BIOS_WAIT_FOREVER
+                        : (NFC_FALLBACK_MS * 1000u) / Clock_tickPeriod;
+            uint32_t ev = Event_pend(hNfcEvent, Event_Id_NONE, NFC_EVENT_IRQ, to);
+            if ((ev & NFC_EVENT_IRQ) != 0u) {
+                if (++s_irq_wakes <= 8u) {
+                    HWUART_Printf("IRQ_N wake #%u\r\n", (unsigned)s_irq_wakes);
+                }
+            }
+        } else {
+            /* no event object: keep a plain poll going */
+            Task_sleep((NFC_FALLBACK_MS ? NFC_FALLBACK_MS : 20u) * 1000u
+                       / Clock_tickPeriod);
+        }
     }
 }
 

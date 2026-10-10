@@ -24,7 +24,9 @@ void EPD_2IN13_SendCommand(uint8_t Reg);
 void EPD_2IN13_SendData(uint8_t Data);
 void EPD_2IN13_ReadBusy(void);
 
-#define REED_PIN    IOID_13     // reed switch, ground when there is magnet
+/* IOID_13 used to be described here as a reed switch, but on this board it
+ * carries the FM11NC08S IRQ_N input; the responder in nfc_esl.c owns it.  The
+ * old REED_PIN macro was never referenced anywhere, so it is gone. */
 #define TEST_PIN    IOID_15     // on back of pcb with 'test'
 
 #define EPD_POWER_PIN             IOID_20       // low active

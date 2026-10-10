@@ -144,6 +144,13 @@ int main()
 {
   /* Register Application callback to trap asserts raised in the Stack */
   RegisterAssertCback(AssertHandler);
+
+  /* Bring up the Power driver BEFORE anything uses it.  The stock TI boards do
+   * this inside Board_init(); this project replaced Board_init() with a bare
+   * PIN_init(), so Power_init() was never called - which silently kept the
+   * device out of standby.  Required for POWER_SAVING (and harmless without). */
+  Power_init();
+
   PIN_init(BoardGpioInitTable);
 
 #ifdef CC1350_LAUNCHXL
