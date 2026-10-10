@@ -66,6 +66,12 @@ static uint16_t s_last_day_code = 0xFFFF;
 //                   1 = 7-segment LED vector
 static volatile uint8_t s_clock_face = 0;
 
+// Display mode: 0 = clock (the 1-minute tick owns the panel)
+//               1 = image (whatever the phone / BLE app pushed stays put)
+// Every image path sets this to 1 on success, so nothing has to remember
+// to "hold" the clock: the tick simply stops being allowed to render.
+static volatile uint8_t s_display_mode = 0;
+
 // =====================================================================
 // 7-segment LED vector drawing
 // =====================================================================
@@ -318,6 +324,7 @@ void epd_clock_init(void) {
     s_last_minute = 0xFF;
     s_last_day_code = 0xFFFF;
     s_clock_face = 0;
+    s_display_mode = 0;          /* boot into clock mode */
 }
 
 // Switch clock face style and force full refresh
@@ -331,6 +338,27 @@ void epd_clock_switch_face(void) {
 // Get current clock face style (0=dot-matrix, 1=7-segment LED)
 uint8_t epd_clock_get_face(void) {
     return s_clock_face;
+}
+
+// ---- display mode -------------------------------------------------
+// mode: 0 = clock, 1 = image.  Returns the mode actually in effect.
+// Switching back to the clock arms ONE full render so the time reappears
+// right away; switching to image is passive - the panel simply keeps
+// showing whatever was last drawn into it.
+uint8_t epd_clock_set_mode(uint8_t mode) {
+    uint8_t m = mode ? 1u : 0u;
+
+    if (m == 0u) {
+        s_force_refresh  = 1;
+        s_last_minute    = 0xFF;
+        s_last_day_code  = 0xFFFF;
+    }
+    s_display_mode = m;
+    return s_display_mode;
+}
+
+uint8_t epd_clock_get_mode(void) {
+    return s_display_mode;
 }
 
 void epd_clock_set_time(const uint8_t *data) {
@@ -393,6 +421,10 @@ void epd_clock_get_time_raw(uint8_t *out) {
 }
 
 uint8_t epd_clock_need_refresh(void) {
+    /* image mode: the panel belongs to the picture until the user switches
+     * back, so the minute tick must never overwrite it */
+    if (s_display_mode != 0) return 0;
+
     if (!s_time_is_set) return 0;
 
     if (s_force_refresh) {
@@ -727,7 +759,13 @@ void epd_clock_render(uint8_t partial) {
         }
 
         EPD_2IN13_UpdatePartial();
-        EPD_2IN13_Sleep();
+        /* NOT EPD_2IN13_Sleep(): deep sleep + cutting the PWR pin makes the
+         * panel unrecoverable inside an NFC tap (a re-init costs ~500 ms and
+         * the reader's frame waiting time is 9.7 ms), so every NFC image
+         * refresh used to land in a dead framebuffer while F0 DE answered
+         * "busy" forever.  SleepLight keeps VCC and the RAM, so a later
+         * "0x22 0xC7 / 0x20" resumes it. */
+        EPD_2IN13_SleepLight();
     } else {
         EPD_2IN13_Init();
 
@@ -764,7 +802,7 @@ void epd_clock_render(uint8_t partial) {
         }
 
         EPD_2IN13_UpdateDisplay();
-        EPD_2IN13_Sleep();
+        EPD_2IN13_SleepLight();   /* keep VCC + RAM: see UpdatePartial above */
     }
 
     HWUART_Printf("calendar rendered\r\n");

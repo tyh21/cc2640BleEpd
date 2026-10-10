@@ -22,6 +22,10 @@ void EPDTask_RegisterResponseCallback(EpdResponseCallback callback);
 
 void TaskEPD_createTask(void);
 
+// Hold off the periodic clock refresh while another producer (the NFC
+// responder) owns the panel.  active != 0 freezes the clock refresh.
+void EPDTask_setImageTransfer(uint8_t active);
+
 // called by other task to notify this task with command frame
 //void epd_on_rx_cmd(const uint8_t *buf, int len);
 

@@ -13,6 +13,7 @@
 //#include <ti/drivers/uart/UARTCC26XX.h>
 #include "task_epd.h"
 #include "epd_clock.h"
+#include "nfc_esl.h"     /* NfcEsl_busy(): don't start a render under a tap */
 
 
 // if defined, not calling actual epd function, just test protocol
@@ -63,18 +64,32 @@ uint8_t VERSION_MINOR = 2;
 
     EPD_CMD_SWITCH_FACE = 0x60,  // åˆ‡æ¢æ—¶é’Ÿè¡¨ç›˜
 
+    EPD_CMD_SET_MODE = 0x70,     // æ˜¾ç¤ºæ¨¡å¼: data[0] = 0 æ—¶é’Ÿ / 1 å›¾ç‰‡
+    EPD_CMD_GET_MODE = 0x71,     // è¯»æ˜¾ç¤ºæ¨¡å¼, resp[1] = å½“å‰æ¨¡å¼
+
   };
  
  
  
 #define EPD_TASK_PRIORITY                     2
-#define EPD_TASK_STACK_SIZE                   2048
+/* Stack budget, and it is NOT free: everything this task declares comes
+ * out of the same ICall heap the BLE5 stack allocates from.  2048 was
+ * pure waste, 1536 was still generous, and 1024 is ~2x the deepest real
+ * path (Event_pend -> handle_cmd -> epd_clock_render -> HWUART_Printf's
+ * own 108-byte format buffer).  The 512 bytes handed back here are what
+ * lets the BLE stack finish a central's service discovery. */
+#define EPD_TASK_STACK_SIZE                   1024
 Task_Struct EPDTask;
 Char EPDTaskStack[EPD_TASK_STACK_SIZE];
 
 // cc2640 received epd command frame from andoid app
 // first byte is length, second is command, third and follow are command data if any
-static uint8_t epd_rx_frame[251];
+// 160 is bigger than any frame the BLE path can deliver: MAX_PDU_SIZE=135
+// caps one ATT write at 128 bytes of payload, so 251 was 91 wasted bytes of
+// the ICall heap.  EPDTask_parseCommand drops anything larger instead of
+// overrunning the buffer.
+#define EPD_RX_FRAME_LEN   160
+static uint8_t epd_rx_frame[EPD_RX_FRAME_LEN];
 uint8_t rx_fram_len = 0;
 
 static uint8_t epd_resp_frame[11];
@@ -123,7 +138,7 @@ void TaskEPD_createTask(void)
 /*********************************************************************
  * @fn      TaskEPD_taskInit
  *
- * @brief   ´®¿Ú³õÊ¼»¯
+ * @brief   ï¿½ï¿½ï¿½Ú³ï¿½Ê¼ï¿½ï¿½
  *
  * @param   None
  *
@@ -148,7 +163,7 @@ void TaskEPD_taskInit(void)
 /*********************************************************************
  * @fn      TaskEPD_taskFxn
  *
- * @brief   ´®¿ÚÈÎÎñ´¦Àí
+ * @brief   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
  *
  * @param   None
  *
@@ -185,8 +200,13 @@ void TaskEPD_taskFxn(UArg a0, UArg a1)
 
     if(events & EPDTASK_EVENT_CLOCK_TICK)
     {
-      // Skip clock refresh while image transfer is in progress
-      if (!s_img_transfer_active) {
+      // Skip clock refresh while an image transfer is in progress, and also
+      // while a phone is on the NFC antenna: a render takes seconds and drives
+      // the same SPI + the same panel RAM the NFC responder is streaming into,
+      // so starting one under a tap would corrupt both.  (A render already in
+      // flight when the tap begins still races - re-tap if the image looks
+      // wrong.)
+      if (!s_img_transfer_active && !NfcEsl_busy()) {
         uint8_t refresh = epd_clock_need_refresh();
         if (refresh)
         {
@@ -295,13 +315,22 @@ void handle_cmd()
      #ifndef EPD_DRY_RUN
    EPD_2IN13_UpdateDisplay();
 #endif
+    /* The picture is on the panel now, so hand the screen over to image
+     * mode: the 1-minute clock tick stops touching it and the image stays
+     * up until the user switches back (0x70 mode=0).  Without this the
+     * clock repaints itself over the image within a minute. */
+    epd_clock_set_mode(EPD_MODE_IMAGE);
+    HWUART_Printf("display mode -> image (sticky)\r\n");
     break;
     
     case EPD_CMD_DEINIT:
     HWUART_Printf("deinit\r\n");
     s_img_transfer_active = 0;  // image transfer done
      #ifndef EPD_DRY_RUN
-      EPD_2IN13_Sleep();
+      /* SleepLight, not Sleep: the panel must stay resumable for an NFC tap.
+       * Deep sleep + a cut PWR pin can only be undone by a ~500 ms re-init,
+       * which cannot happen inside an ISO-DEP exchange. */
+      EPD_2IN13_SleepLight();
 #endif
     break;
     
@@ -311,6 +340,10 @@ void handle_cmd()
     #ifndef EPD_DRY_RUN
     EPD_2IN13_QuickCmd(0x30);
 #endif
+    /* Rule: whatever the app pushes onto the panel owns the panel until the
+     * user switches back with 0x70 mode=0.  Without this the clock repaints
+     * itself over the pushed content within a minute. */
+    epd_clock_set_mode(EPD_MODE_IMAGE);
     break;
     
     case EPD_CMD_TEST_PATTERN:
@@ -319,6 +352,7 @@ void handle_cmd()
     #ifndef EPD_DRY_RUN
     EPD_2IN13_QuickCmd(0x31);
 #endif
+    epd_clock_set_mode(EPD_MODE_IMAGE);
     break;
     
     case EPD_CMD_ALL_BLACK:
@@ -327,6 +361,7 @@ void handle_cmd()
     #ifndef EPD_DRY_RUN
     EPD_2IN13_QuickCmd(0x32);
 #endif
+    epd_clock_set_mode(EPD_MODE_IMAGE);
     break;
 
     case EPD_CMD_LED_TEST:
@@ -371,6 +406,37 @@ void handle_cmd()
     epd_resp_frame[1] = epd_clock_get_face();
     break;
 
+    case EPD_CMD_SET_MODE:
+    // data[0] = 0 clock / 1 image.  Setting image mode is what keeps a
+    // pushed picture on screen instead of being overwritten a minute later.
+    if (rx_fram_len >= 2) {
+        HWUART_Printf("set mode %u\r\n", (unsigned)epd_rx_frame[1]);
+        if (epd_rx_frame[1] == 0) {
+            /* Asking for the clock is an explicit "give me the screen back":
+             * drop every hold first (NFC's image hold, the transfer flag, the
+             * exchange flag) - a hold left behind by an aborted tap would
+             * otherwise keep the tick suppressed and the calendar would never
+             * return.  Then re-arm the full render and run it NOW instead of
+             * waiting up to a second for the next periodic tick. */
+            NfcEsl_yieldPanel();
+            s_img_transfer_active = 0;
+            epd_clock_set_mode(EPD_MODE_CLOCK);
+            Event_post(hEPDEvent, EPDTASK_EVENT_CLOCK_TICK);
+        } else {
+            epd_clock_set_mode(EPD_MODE_IMAGE);
+        }
+    } else {
+        HWUART_Printf("set mode (no arg)\r\n");
+    }
+    resp_fram_len = 2;
+    epd_resp_frame[1] = epd_clock_get_mode();
+    break;
+
+    case EPD_CMD_GET_MODE:
+    resp_fram_len = 2;
+    epd_resp_frame[1] = epd_clock_get_mode();
+    break;
+
   default:
     HWUART_Printf("unknown cmd\r\n");
     resp_fram_len = 0;
@@ -382,6 +448,10 @@ void handle_cmd()
 
 void EPDTask_parseCommand(uint8_t *pMsg, uint8_t length)
 {
+  if (length > EPD_RX_FRAME_LEN) {
+    HWUART_Printf("epd frame too long (%u) - dropped\r\n", (unsigned)length);
+    return;
+  }
   memcpy(epd_rx_frame, pMsg, length);
   rx_fram_len = length;
     Event_post(hEPDEvent, EPDTASK_EVENT_RX_REQUEST);
@@ -392,4 +462,11 @@ static void clockTickCb(UArg arg)
 {
   epd_clock_tick();
   Event_post(hEPDEvent, EPDTASK_EVENT_CLOCK_TICK);
+}
+
+// Called by the NFC responder: while it is streaming an image into the
+// panel, the 1-second clock refresh must not touch the same SPI/RAM.
+void EPDTask_setImageTransfer(uint8_t active)
+{
+    s_img_transfer_active = active ? 1 : 0;
 }

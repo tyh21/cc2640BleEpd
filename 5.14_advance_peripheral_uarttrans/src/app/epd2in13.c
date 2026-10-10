@@ -155,6 +155,12 @@ static void DEV_SPI_WriteByte(uint8_t byte)
 // should be only called once!
 void epd_hw_init()
 {
+    // Idempotent on purpose: both the EPD task and the NFC task come up
+    // through this call, and whichever runs first must be able to set it up
+    // without the second one opening the same pins and SPI a second time.
+    if (GPIOHandle != NULL) {
+        return;
+    }
 
     HwUARTPrintf("setup epd gpio\r\n");
     GPIOHandle = PIN_open(&GPIOState, GPIOTable);
@@ -185,11 +191,13 @@ parameter:
 static void EPD_2IN13_Reset(void)
 {
     DEV_Digital_Write(EPD_RST_PIN, 1);
-    DEV_Delay_ms(200);
+    DEV_Delay_ms(20);
     DEV_Digital_Write(EPD_RST_PIN, 0);
-    DEV_Delay_ms(2);
+    DEV_Delay_ms(20);         /* 2 ms was marginal - a panel left latched
+                               * by a previous firmware needs a solid low
+                               * pulse to release it                        */
     DEV_Digital_Write(EPD_RST_PIN, 1);
-    DEV_Delay_ms(200);
+    DEV_Delay_ms(20);
 }
 
 /******************************************************************************
@@ -220,23 +228,102 @@ void EPD_2IN13_SendData(uint8_t Data)
 
 /******************************************************************************
 function :	Wait until the busy_pin goes LOW
-parameter:
+
+             The wait budget is a variable, and that matters a lot:
+             - a full 2.13" update legitimately holds BUSY high for a few
+               seconds, so the refresh path gets 15 s;
+             - panel bring-up gets only 2 s, because a latched-busy panel
+               used to burn the old fixed 30 s timeout three times in a row
+               (EPD_2IN13_Init called ReadBusy 3x) and kept the whole NFC
+               responder - and the boot banner - off the air for 91 seconds.
 ******************************************************************************/
+static uint16_t s_busy_budget_ms = 15000u;
+static uint16_t s_busy_stalls    = 0u;
+
+/* How many times a BUSY wait ran out of budget since boot.  Exposed so the
+ * NFC task can report it - 0 is the healthy case. */
+uint16_t EPD_2IN13_BusyStalls(void)
+{
+    return s_busy_stalls;
+}
+
 void EPD_2IN13_ReadBusy(void)
 {
-    HwUARTPrintf("e-Paper busy\r\n");
-    uint16_t timeout = 0;
-    while(DEV_Digital_Read(EPD_BUSY_PIN) == 1) {      //LOW: idle, HIGH: busy
-        DEV_Delay_ms(100);
-        timeout++;
-        if (timeout > 300) {  // 30秒超时
-            HwUARTPrintf("e-Paper busy timeout!\r\n");
+    uint16_t waited = 0;
+
+    while (DEV_Digital_Read(EPD_BUSY_PIN) == 1) {     //LOW: idle, HIGH: busy
+        DEV_Delay_ms(50);
+        waited = (uint16_t)(waited + 50u);
+        if (waited >= s_busy_budget_ms) {
+            s_busy_stalls++;
             break;
         }
     }
-    HwUARTPrintf("e-Paper busy release\r\n");
 }
 
+
+/******************************************************************************
+function :	Load the full-refresh waveform set + the analog registers into the
+            controller.
+
+            EPD_2IN13_Init() sends exactly this as part of its 500 ms bring-up.
+            The NFC image path cannot afford a bring-up - the reader's frame
+            waiting time is 9.7 ms - but it DOES have to undo whatever the
+            clock's partial render left behind: EPD_2IN13_SwitchToPartialLUT()
+            switches VCOM and loads the partial waveform, and refreshing a
+            whole new image with the partial waveform looks washed out.
+
+            That is ~80 SPI bytes, well under a millisecond, so it fits inside
+            an ISO-DEP exchange.  Byte sequence is identical to Init's.
+******************************************************************************/
+void EPD_2IN13_LoadFullLUT(void)
+{
+    uint8_t i;
+
+    EPD_2IN13_SendCommand(0x03);                       // VCOM register
+    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[70]);
+
+    EPD_2IN13_SendCommand(0x04);                       // VGH/VGL/VDL/VDH
+    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[71]);
+    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[72]);
+    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[73]);
+
+    EPD_2IN13_SendCommand(0x3A);                       // dummy line
+    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[74]);
+    EPD_2IN13_SendCommand(0x3B);                       // gate line width
+    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[75]);
+
+    EPD_2IN13_SendCommand(0x32);                       // LUT register (70 B)
+    for (i = 0; i < 70; i++) {
+        EPD_2IN13_SendData(EPD_2IN13_lut_full_update[i]);
+    }
+}
+
+/******************************************************************************
+function :	Power the analog block down, but KEEP VCC and the RAM contents.
+
+            This exists because of a confirmed field failure: the clock task
+            ends every render with EPD_2IN13_Sleep(), which puts the panel in
+            DEEP SLEEP and then cuts the PWR pin.  Coming back from that needs
+            a hardware reset + full re-init (~500 ms), and 500 ms cannot happen
+            inside an ISO-DEP exchange, so the NFC image path could never wake
+            the panel: F0 D2 wrote into a dead framebuffer, F0 D4 refreshed
+            nothing, and BUSY floated HIGH - which made F0 DE answer "busy"
+            forever while the phone polled it.
+
+            With this lighter power-off the panel is still resumable: a later
+            "0x22 0xC7 / 0x20" re-enables the analog and refreshes from the
+            RAM it already holds.  Idle current is the driver's standby, and
+            that is the price of being tappable at any moment.
+******************************************************************************/
+void EPD_2IN13_SleepLight(void)
+{
+    EPD_2IN13_SendCommand(0x22);
+    EPD_2IN13_SendData(0xC0);      // disable clock signal + analog
+    EPD_2IN13_SendCommand(0x20);
+
+    // deliberately NO 0x10 0x01 (deep sleep) and NO PWR pin change
+}
 
 /******************************************************************************
 function :	Initialize the e-Paper register
@@ -244,15 +331,20 @@ parameter:
 ******************************************************************************/
 void EPD_2IN13_Init()
 {
-    uint8_t i;
-    
+    uint16_t saved_budget = s_busy_budget_ms;
+
+    /* bring-up must never block for tens of seconds - see ReadBusy above */
+    s_busy_budget_ms = 2000u;
+
     // power on (LOW active)
     DEV_Digital_Write(EPD_POWER_PIN, 0);
     DEV_Delay_ms(100);
 
     EPD_2IN13_Reset();
 
-    EPD_2IN13_ReadBusy();
+    /* Soft reset FIRST, then wait.  The old order (wait - reset - wait)
+     * meant a panel still latched-busy from a previous firmware made the
+     * very first wait run its whole timeout before 0x12 was ever sent. */
     EPD_2IN13_SendCommand(0x12); // soft reset
     EPD_2IN13_ReadBusy();
 
@@ -289,27 +381,9 @@ void EPD_2IN13_Init()
     EPD_2IN13_SendCommand(0x2C); // VCI voltage
     EPD_2IN13_SendData(0x55);
 
-    // Write VCOM register
-    EPD_2IN13_SendCommand(0x03);
-    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[70]);
-
-    // Write VGH/VGL/VDL/VDH register
-    EPD_2IN13_SendCommand(0x04);
-    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[71]);
-    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[72]);
-    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[73]);
-
-    // Set dummy line and gate time
-    EPD_2IN13_SendCommand(0x3A);
-    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[74]);
-    EPD_2IN13_SendCommand(0x3B);
-    EPD_2IN13_SendData(EPD_2IN13_lut_full_update[75]);
-
-    // Write LUT register (70 bytes)
-    EPD_2IN13_SendCommand(0x32);
-    for (i = 0; i < 70; i++) {
-        EPD_2IN13_SendData(EPD_2IN13_lut_full_update[i]);
-    }
+    // Write VCOM, VGH/VGL/VDL/VDH, dummy/gate timing and the 70-byte full LUT.
+    // Same sequence the NFC path replays on its own (EPD_2IN13_LoadFullLUT).
+    EPD_2IN13_LoadFullLUT();
 
     // Set RAM X address counter
     EPD_2IN13_SendCommand(0x4E);
@@ -320,6 +394,8 @@ void EPD_2IN13_Init()
     EPD_2IN13_SendData(0x00);
 
     EPD_2IN13_ReadBusy();
+
+    s_busy_budget_ms = saved_budget;
 
     HwUARTPrintf("epd initialized\r\n");
 }
@@ -439,6 +515,66 @@ void EPD_2IN13_WriteRAM(const uint8_t *buf, const int len)
     for (int i = 0; i < len; i++) {
         EPD_2IN13_SendData(buf[i]);
     }
+}
+
+/******************************************************************************
+function :	Write a run of bytes at an explicit offset in the 4000-byte
+             B/W RAM window (used by the NFC streaming path).
+
+             pos = P2 * 250 + offset-inside-packet  (0..3999)
+             X   = pos % 16  -> RAM X counter (0x4E)
+             Y   = pos / 16  -> RAM Y counter (0x4F, 9 bits)
+
+             The counter is re-armed on EVERY call, which is exactly what
+             makes a retransmitted ISO-DEP block harmless: it lands on the
+             cells it already wrote instead of running on.
+******************************************************************************/
+void EPD_2IN13_WriteRAMAt(uint32_t pos, const uint8_t *buf, int len)
+{
+    uint32_t y = pos >> 4;
+
+    EPD_2IN13_SendCommand(0x4E);                       // RAM X address
+    EPD_2IN13_SendData((uint8_t)(pos & 0x0Fu));
+
+    EPD_2IN13_SendCommand(0x4F);                       // RAM Y address
+    EPD_2IN13_SendData((uint8_t)(y & 0xFFu));
+    EPD_2IN13_SendData((uint8_t)((y >> 8) & 0x01u));
+
+    EPD_2IN13_SendCommand(0x24);                       // write to B/W RAM
+    for (int i = 0; i < len; i++) {
+        EPD_2IN13_SendData(buf[i]);
+    }
+}
+
+/******************************************************************************
+function :	Non-blocking BUSY probe (1 = busy, 0 = idle)
+******************************************************************************/
+uint8_t EPD_2IN13_IsBusy(void)
+{
+    return (uint8_t)(DEV_Digital_Read(EPD_BUSY_PIN) & 1);
+}
+
+/******************************************************************************
+function :	Start a full refresh and return immediately.
+
+             0x22 0xC7 = activate update with the full waveform, 0x20 = master
+             activation.  These are three short SPI bytes; the seconds-long
+             panel work happens afterwards, and the caller polls
+             EPD_2IN13_IsBusy() instead of blocking a real-time task.
+
+             The full LUT is re-loaded first on purpose: this entry point is
+             used by the NFC image path, and the clock's partial render may
+             have left the partial waveform (and VCOM) loaded.  ~80 bytes of
+             SPI, well inside a frame waiting time, and it makes the result
+             independent of what ran before.
+******************************************************************************/
+void EPD_2IN13_UpdateDisplayAsync(void)
+{
+    EPD_2IN13_LoadFullLUT();
+
+    EPD_2IN13_SendCommand(0x22);
+    EPD_2IN13_SendData(0xC7);
+    EPD_2IN13_SendCommand(0x20);
 }
 
 void EPD_2IN13_UpdateDisplay(void)
@@ -671,7 +807,7 @@ void EPD_2IN13_QuickCmd(uint8_t cmd)
     case 0x30: // clear
         EPD_2IN13_Init();
         EPD_2IN13_Clear();
-        EPD_2IN13_Sleep();
+        EPD_2IN13_SleepLight();
         break;
 
     case 0x31: // checkerboard
@@ -692,7 +828,7 @@ void EPD_2IN13_QuickCmd(uint8_t cmd)
             }
         }
         EPD_2IN13_UpdateDisplay();
-        EPD_2IN13_Sleep();
+        EPD_2IN13_SleepLight();
         break;
 
     case 0x32: // all black
@@ -709,7 +845,7 @@ void EPD_2IN13_QuickCmd(uint8_t cmd)
             }
         }
         EPD_2IN13_UpdateDisplay();
-        EPD_2IN13_Sleep();
+        EPD_2IN13_SleepLight();
         break;
 
     default:

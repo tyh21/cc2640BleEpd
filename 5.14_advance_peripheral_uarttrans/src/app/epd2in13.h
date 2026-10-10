@@ -29,6 +29,28 @@ void EPD_2IN13_PrepareBlkRAM(void);
 void EPD_2IN13_PrepareRedRAM(void);
 void EPD_2IN13_WriteRAM(const uint8_t *buf, const int len);
 
+// Direct framebuffer write at an explicit byte offset (NFC streaming path).
+//   pos = byte offset inside the 4000-byte SSD1680 window (0..3999)
+//   X   = pos % 16      (one byte = 8 pixels)
+//   Y   = pos / 16      (0..249, the gate line)
+// The B/W RAM address counter is re-loaded on every call, so a retransmitted
+// packet simply rewrites the same cells instead of shifting the image.
+void EPD_2IN13_WriteRAMAt(uint32_t pos, const uint8_t *buf, int len);
+
+// Non-blocking busy probe: 1 = panel busy, 0 = idle.  (EPD_2IN13_ReadBusy()
+// waits; this one lets a real-time task poll instead.)
+uint8_t EPD_2IN13_IsBusy(void);
+
+// Number of BUSY waits that ran out of budget since boot (0 = healthy).
+// A non-zero value means the panel did not answer - usually "panel not
+// connected" or "left latched by a previous firmware".
+uint16_t EPD_2IN13_BusyStalls(void);
+
+// Kick off a full refresh and return AT ONCE, without waiting for BUSY.
+// The NFC responder needs this: the reader is answered in a 9.7 ms window
+// while a 2.13" update takes seconds.  Poll EPD_2IN13_IsBusy() afterwards.
+void EPD_2IN13_UpdateDisplayAsync(void);
+
 void EPD_2IN13_UpdateDisplay(void);    // full refresh
 void EPD_2IN13_UpdatePartial(void);   // partial refresh (no flicker)
 void EPD_2IN13_QuickCmd(uint8_t cmd);
@@ -41,5 +63,16 @@ void EPD_2IN13_DisplayPart(const uint8_t *Image);           // subsequent: 0x24=
 
 void EPD_2IN13_Sleep(void);
 void EPD_2IN13_PowerOff(void);   // power off without deep sleep (for partial mode)
+
+// Power the analog block down but KEEP VCC + the RAM contents, so a plain
+// "0x22 0xC7 / 0x20" update can resume the panel.  Deep sleep (plus cutting
+// the PWR pin) is unrecoverable inside an ISO-DEP exchange, and that is what
+// used to make the NFC image path land in a dead framebuffer - see the
+// comment on the implementation.
+void EPD_2IN13_SleepLight(void);
+
+// Re-load VCOM + the 70-byte full-refresh LUT without a full bring-up.
+// Used by the NFC image path to undo the clock's partial waveform.
+void EPD_2IN13_LoadFullLUT(void);
 
 #endif

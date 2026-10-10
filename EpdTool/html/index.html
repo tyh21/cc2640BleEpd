@@ -146,6 +146,21 @@ label { margin-right: 4px; white-space: nowrap; }
         </fieldset>
 
         <fieldset>
+            <legend>显示模式</legend>
+            <div class="flex-container">
+                <div class="flex-group">
+                    <button id="modeClockBtn" class="primary" disabled onclick="setDisplayMode(0)">时钟模式</button>
+                    <button id="modeImageBtn" class="secondary" disabled onclick="setDisplayMode(1)">图片模式</button>
+                    <label style="margin-left:8px">当前:</label>
+                    <span class="info-tag" id="modeLabel">未知</span>
+                </div>
+                <div class="flex-group">
+                    <span style="font-size:.8rem;color:#666">图片模式：传上去的画面会一直保留，时钟不再每分钟覆盖它；切回时钟模式会立刻重画一次表盘</span>
+                </div>
+            </div>
+        </fieldset>
+
+        <fieldset>
             <legend>时钟</legend>
             <div class="flex-container">
                 <div class="flex-group">
@@ -181,6 +196,24 @@ label { margin-right: 4px; white-space: nowrap; }
                 <div class="flex-group">
                     <label for="threshold">阈值</label>
                     <input type="number" id="threshold" value="128" min="0" max="255" style="width:70px" onchange="convertDithering()">
+                </div>
+            </div>
+            <div class="flex-container">
+                <div class="flex-group">
+                    <label>图片旋转</label>
+                    <button type="button" class="secondary" onclick="rotateCanvas(90)" title="顺时针 90°">&#8635; 右转 90°</button>
+                    <button type="button" class="secondary" onclick="rotateCanvas(-90)" title="逆时针 90°">&#8634; 左转 90°</button>
+                    <button type="button" class="secondary" onclick="rotateCanvas(180)" title="旋转 180°">转 180°</button>
+                    <button type="button" onclick="resetRotation()">复位</button>
+                    <span class="info-tag" id="rotLabel">0&deg;</span>
+                </div>
+                <div class="flex-group">
+                    <label for="fitMode">缩放</label>
+                    <select id="fitMode" onchange="repaint()">
+                        <option value="contain">留白（完整显示）</option>
+                        <option value="cover">铺满（裁切多余）</option>
+                    </select>
+                    <span style="font-size:.8rem;color:#666">先旋转、再等比缩放适配画布：不会被压扁，转 90&deg; 也不会变小</span>
                 </div>
             </div>
             <div class="status-bar"><b>状态：</b><span id="status">就绪</span></div>
@@ -253,7 +286,8 @@ const CMD = {
     CLEAR: 0x30, TEST: 0x31, ALLBLACK: 0x32,
     LED_TEST: 0x40, LED_TOGGLE: 0x41,
     SET_TIME: 0x50, GET_TIME: 0x51,
-    SWITCH_FACE: 0x60
+    SWITCH_FACE: 0x60,
+    SET_MODE: 0x70, GET_MODE: 0x71
 };
 
 const EPD_WIDTH = 104, EPD_HEIGHT = 212;
@@ -269,6 +303,10 @@ let brushColor = '#000000', brushSize = 1, currentTool = null;
 let textBold = false, textItalic = false, isTextMode = false;
 let lineSegments = [], textElements = [];
 let connected = false;
+// 图片旋转：0 / 90 / 180 / 270（顺时针），作用于整块画布
+let rotation = 0;
+// 当前底图（未旋转的原始 Image），每次重绘时按 rotation 现算
+let sourceImage = null;
 
 // ============================================================
 // BLE 连接
@@ -357,6 +395,19 @@ async function waitNotify(timeout = 5000) {
     });
 }
 
+// 等"某条命令"的应答：中间夹杂的别的 Notify（比如上一条命令迟到的回复）
+// 直接丢掉，避免读错数据。找不到就返回 null。
+async function waitResp(cmd, timeout = 5000) {
+    const deadline = Date.now() + timeout;
+    while (true) {
+        const left = deadline - Date.now();
+        if (left <= 0) return null;
+        const r = await waitNotify(left);
+        if (!r) return null;
+        if (r[0] === cmd) return r;
+    }
+}
+
 function updateButtons() {
     const s = connected ? false : true;
     document.getElementById('clearBtn').disabled = s;
@@ -368,6 +419,8 @@ function updateButtons() {
     document.getElementById('syncTimeBtn').disabled = s;
     document.getElementById('getTimeBtn').disabled = s;
     document.getElementById('switchFaceBtn').disabled = s;
+    document.getElementById('modeClockBtn').disabled = s;
+    document.getElementById('modeImageBtn').disabled = s;
 }
 
 // ============================================================
@@ -396,7 +449,12 @@ async function readVersion() {
     try {
         // 发送读版本命令, 固件通过 Notify 回复
         await writeCmd(CMD.READ_VER);
-        // 版本会在 onNotify 中显示
+        const resp = await waitResp(CMD.READ_VER, 3000);
+        if (resp && resp.length >= 3) {
+            document.getElementById('fwVer').textContent = 'v' + resp[1] + '.' + resp[2];
+        }
+        // 顺手读一次显示模式，让上面的开关第一次就连对
+        await readDisplayMode();
     } catch (e) { /* ignore */ }
 }
 
@@ -465,9 +523,13 @@ async function sendImage() {
     await writeCmd(CMD.DEINIT);
     await waitNotify();
 
+    // 固件在图片刷新成功时已自动切到图片模式（否则一分钟后会被时钟覆盖），
+    // 这里读一次把界面上的开关同步过来
+    await readDisplayMode();
+
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     setProgress(100);
-    setStatus('完成! 耗时 ' + elapsed + 's');
+    setStatus('完成! 耗时 ' + elapsed + 's，已保持图片模式');
     addLog('图片发送完成, 耗时 ' + elapsed + 's');
 }
 
@@ -496,22 +558,101 @@ function canvas2ram(cvs) {
 }
 
 // ============================================================
+// 图片旋转（顺序：先旋转，再等比缩放适配画布）
+// ============================================================
+// 要点：绝不能"先压进 104x212 再整体转"——那样转 90° 时还要额外乘 min(104/212,212/104)=0.49，
+// 图片只剩不到一半大（这就是之前"转完变小"的根因）。
+// 正确做法是把"逻辑画布"先摆成旋转后的形状：转 90°/270° 时逻辑画布是 212x104，
+// 图片按逻辑画布等比缩放摆好，最后整块逻辑画布旋转 90° 落回 104x212。
+// 两者面积相同，属于纯旋转，不需要任何额外缩小，所以图片能占满可用空间。
+// 底图、画笔线、文字、鼠标落点全部走同一个映射，转完之后继续画也不会错位。
+
+// 逻辑画布尺寸：转 90°/270° 时宽高互换
+function logicalSize() {
+    const W = canvas.width, H = canvas.height;
+    return (rotation % 180) ? { lw: H, lh: W } : { lw: W, lh: H };
+}
+
+// 把"逻辑画布坐标"映射到屏幕：绕画布中心旋转 rotation°，逻辑画布中心对齐画布中心
+function withRot(c, fn) {
+    const W = canvas.width, H = canvas.height;
+    const { lw, lh } = logicalSize();
+    c.save();
+    c.translate(W / 2, H / 2);
+    c.rotate(rotation * Math.PI / 180);
+    c.translate(-lw / 2, -lh / 2);
+    fn(c);
+    c.restore();
+}
+
+// 在逻辑画布里画底图：等比缩放（保持长宽比），留白居中 或 铺满裁切
+function drawSource(c) {
+    const { lw, lh } = logicalSize();
+    const iw = sourceImage.width, ih = sourceImage.height;
+    const sel = document.getElementById('fitMode');
+    const cover = !!sel && sel.value === 'cover';
+    const s = cover ? Math.max(lw / iw, lh / ih)   // 铺满：短边也对齐，多余部分被画布裁掉
+                    : Math.min(lw / iw, lh / ih);  // 留白：长边对齐，完整显示
+    const dw = iw * s, dh = ih * s;
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = 'high';
+    c.drawImage(sourceImage, (lw - dw) / 2, (lh - dh) / 2, dw, dh);
+}
+
+// 清底 -> 画底图 -> 叠画笔/文字，全部按当前 rotation
+function paintAll() {
+    const W = canvas.width, H = canvas.height;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+    if (sourceImage) {
+        withRot(ctx, drawSource);
+    }
+    redrawLineSegments();
+    redrawTextElements();
+}
+
+// 重画 + 重新取模。必须成对调用：sendImage() 发的是画布像素再按阈值128二值化的结果，
+// 而取模算法（Bayer/FS/Atkinson）正是把结果写回画布的，只重画不重取模会让算法白选。
+function repaint() {
+    paintAll();
+    convertDithering();
+}
+
+function rotateCanvas(deg) {
+    rotation = ((rotation + deg) % 360 + 360) % 360;
+    const el = document.getElementById('rotLabel');
+    if (el) el.textContent = rotation + '\u00B0';
+    repaint();
+    addLog('图片旋转 -> ' + rotation + '\u00B0');
+}
+
+function resetRotation() {
+    rotation = 0;
+    const el = document.getElementById('rotLabel');
+    if (el) el.textContent = '0\u00B0';
+    repaint();
+    addLog('图片旋转已复位');
+}
+
+// ============================================================
 // 图片加载
 // ============================================================
 function loadImageFile() {
     const input = document.getElementById('imageFile');
     if (!input.files.length) return;
     const file = input.files[0];  // 先保存文件引用
-    // 只清画布，不清文件选择
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
     lineSegments = []; textElements = [];
     const img = new Image();
     img.src = URL.createObjectURL(file);
     img.onload = function() {
         URL.revokeObjectURL(this.src);
-        ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, canvas.width, canvas.height);
-        convertDithering();
+        sourceImage = img;
+        repaint();
+        addLog('已载入图片 ' + img.width + 'x' + img.height
+               + (rotation ? '（旋转 ' + rotation + '\u00B0）' : ''));
     };
 }
 
@@ -625,10 +766,18 @@ function toggleTool(tool) {
 
 function getCanvasPos(e) {
     const rect = canvas.getBoundingClientRect();
-    return {
-        x: (e.clientX - rect.left) * canvas.width / rect.width,
-        y: (e.clientY - rect.top) * canvas.height / rect.height
-    };
+    let x = (e.clientX - rect.left) * canvas.width / rect.width;
+    let y = (e.clientY - rect.top) * canvas.height / rect.height;
+    // 画面被旋转过时，落点要反变换回"逻辑画布坐标"，否则画的位置会跟着转
+    if (rotation !== 0) {
+        const W = canvas.width, H = canvas.height;
+        const { lw, lh } = logicalSize();
+        const rad = -rotation * Math.PI / 180;
+        const X = x - W / 2, Y = y - H / 2;
+        x = lw / 2 + (X * Math.cos(rad) - Y * Math.sin(rad));
+        y = lh / 2 + (X * Math.sin(rad) + Y * Math.cos(rad));
+    }
+    return { x, y };
 }
 
 function onCanvasDown(e) {
@@ -707,27 +856,36 @@ function placeText(e) {
 }
 
 function redrawLineSegments() {
-    lineSegments.forEach(s => {
-        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-        ctx.strokeStyle = s.color; ctx.lineWidth = s.size;
-        ctx.beginPath();
-        if (s.type === 'dot') { ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + .1, s.y + .1); }
-        else { ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); }
-        ctx.stroke();
+    if (!lineSegments.length) return;
+    withRot(ctx, (c) => {
+        lineSegments.forEach(s => {
+            c.lineJoin = 'round'; c.lineCap = 'round';
+            c.strokeStyle = s.color; c.lineWidth = s.size;
+            c.beginPath();
+            if (s.type === 'dot') { c.moveTo(s.x, s.y); c.lineTo(s.x + .1, s.y + .1); }
+            else { c.moveTo(s.x1, s.y1); c.lineTo(s.x2, s.y2); }
+            c.stroke();
+        });
     });
 }
 
 function redrawTextElements() {
-    textElements.forEach(t => {
-        ctx.font = t.font; ctx.fillStyle = t.color;
-        ctx.fillText(t.text, t.x, t.y);
+    if (!textElements.length) return;
+    withRot(ctx, (c) => {
+        textElements.forEach(t => {
+            c.font = t.font; c.fillStyle = t.color;
+            c.fillText(t.text, t.x, t.y);
+        });
     });
 }
 
 function clearCanvas() {
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    sourceImage = null;
     lineSegments = []; textElements = [];
+    repaint();
+    // 允许重新选同一个文件
+    const input = document.getElementById('imageFile');
+    if (input) input.value = '';
 }
 
 // ============================================================
@@ -746,9 +904,20 @@ async function syncTime() {
     ]);
     addLog('同步时间: ' + now.toLocaleString('zh-CN') + '.' + String(ms).padStart(3,'0'));
     await writeCmd(data);
-    const resp = await waitNotify(5000);
-    if (resp && resp[0] === CMD.SET_TIME) {
+    const resp = await waitResp(CMD.SET_TIME, 5000);
+    if (resp) {
         addLog('时间同步成功');
+        // 对完时间一般就是想看表盘：顺手切回时钟模式。
+        // 否则显示模式还停在"图片"，画面纹丝不动 —— 看起来就像"切不回去"。
+        const m = await setDisplayMode(0, true);
+        if (m === 0) {
+            setStatus('时间已同步，并切回时钟模式（表盘马上重画）');
+        } else if (m === 1) {
+            addLog('注意：设备仍停在图片模式');
+            setStatus('时间已同步，但显示模式没切过来 —— 点上面「时钟模式」');
+        } else {
+            setStatus('时间已同步（显示模式切换无应答，可直接点「时钟模式」）');
+        }
     } else {
         addLog('时间同步失败: 未收到确认');
     }
@@ -779,14 +948,56 @@ async function getTime() {
 async function switchFace() {
     addLog('切换表盘...');
     await writeCmd(CMD.SWITCH_FACE);
-    const resp = await waitNotify(5000);
-    if (resp && resp[0] === CMD.SWITCH_FACE && resp.length >= 2) {
+    const resp = await waitResp(CMD.SWITCH_FACE, 5000);
+    if (resp && resp.length >= 2) {
         const name = resp[1] === 1 ? '7段LED' : '点阵';
         document.getElementById('faceName').textContent = name;
         addLog('表盘切换为: ' + name);
     } else {
         addLog('切换表盘超时');
     }
+}
+
+// ============================================================
+// 显示模式
+//   0 = 时钟：默认。每分钟到点自动重画表盘
+//   1 = 图片：传上去的画面一直保留，时钟不再覆盖它
+// 固件在"图片刷新成功"时会自动切到图片模式，所以传完图这里读一下同步界面
+// ============================================================
+function applyMode(m) {
+    const img = (m & 1) !== 0;
+    document.getElementById('modeLabel').textContent = img ? '图片' : '时钟';
+    document.getElementById('modeClockBtn').className = img ? 'secondary' : 'primary';
+    document.getElementById('modeImageBtn').className = img ? 'primary' : 'secondary';
+}
+
+async function readDisplayMode() {
+    if (!connected) return;
+    await writeCmd(CMD.GET_MODE);
+    const resp = await waitResp(CMD.GET_MODE, 3000);
+    if (resp && resp.length >= 2) {
+        applyMode(resp[1]);
+        addLog('当前显示模式: ' + (resp[1] ? '图片' : '时钟'));
+    }
+}
+
+// quiet = 由别的操作顺手调用（同步时间），不覆盖它自己的状态提示
+async function setDisplayMode(mode, quiet = false) {
+    const name = mode ? '图片' : '时钟';
+    addLog('切换显示模式 -> ' + name);
+    await writeCmd(new Uint8Array([CMD.SET_MODE, mode ? 1 : 0]));
+    const resp = await waitResp(CMD.SET_MODE, 5000);
+    if (resp && resp.length >= 2) {
+        applyMode(resp[1]);
+        addLog('显示模式 = ' + (resp[1] ? '图片' : '时钟'));
+        if (!quiet) {
+            setStatus(resp[1] ? '已锁定图片模式：画面不会被时钟覆盖'
+                              : '已切回时钟模式：马上重画一次表盘');
+        }
+        return resp[1];
+    }
+    addLog('切换显示模式超时');
+    return -1;
 }
 
 // ============================================================

@@ -62,6 +62,7 @@
 #include "peripheral_uarttrans.h"
 //#include "inc/sdi_task.h"
 #include "task_epd.h"
+#include "nfc_esl.h"
    #include "hw_uart.h"
    
 /* Header files required to enable instruction fetch cache */
@@ -200,6 +201,7 @@ int main()
   HWUART_Init();
   
   TaskEPD_createTask();
+  NfcEsl_createTask();          /* NFC channel: phone tap -> panel      */
   SPPBLEServer_createTask();
 
   /* enable interrupts and start SYS/BIOS */
@@ -247,6 +249,25 @@ int main()
  */
 void AssertHandler(uint8 assertCause, uint8 assertSubcause)
 {
+  /* ICall's free-heap counter - the single number that says whether the
+   * BLE5 stack still has room to work with. */
+  extern uint32_t heapmgrMemFreeTotal;
+
+  /* ---- make the assert VISIBLE ----
+   * The OUT_OF_MEMORY case below used to `break` silently.  That is how a
+   * starved ICall heap hides: BLE still advertises, still connects, still
+   * negotiates MTU - and then quietly fails to allocate the buffers the
+   * central's service discovery needs, so the link times out with no
+   * symptom anywhere on the device.  Printing costs nothing and is the
+   * difference between guessing and knowing.  (Skipped in Hwi context -
+   * UART_write blocks, which is illegal there.) */
+  if (BIOS_getThreadType() != BIOS_ThreadType_Hwi)
+  {
+    HWUART_Printf("\r\n*** STACK ASSERT cause=%u sub=%u heap free=%u B ***\r\n",
+                  (unsigned)assertCause, (unsigned)assertSubcause,
+                  (unsigned)heapmgrMemFreeTotal);
+  }
+
   // Open the display if the app has not already done so
 #if !defined(Display_DISABLE_ALL)
   if ( !dispHandle )

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    只有 ISO14443-4 (ISO-DEP) 的卡才会被本应用接管。
+    ESL 价签芯片（FM11NC08S 跑 ESL 固件）就是 Type-4 / ISO-DEP 卡，
+    NDEF 应用 AID = D2760000850101。
+-->
+<resources>
+    <tech-list>
+        <tech>android.nfc.tech.IsoDep</tech>
+    </tech-list>
+</resources>

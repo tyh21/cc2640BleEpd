@@ -49,4 +49,20 @@ void epd_clock_switch_face(void);
 // Get current clock face style (0=dot-matrix, 1=7-segment LED)
 uint8_t epd_clock_get_face(void);
 
+// ---- Display mode -------------------------------------------------
+// 0 = clock   : the 1-minute tick renders and refreshes the calendar
+// 1 = image   : the panel is "owned" by a picture pushed over BLE or NFC;
+//               the minute tick stops touching it, so the image stays on
+//               screen indefinitely.
+#define EPD_MODE_CLOCK  0
+#define EPD_MODE_IMAGE  1
+
+// Switch mode, returns the mode actually in effect.
+// Switching back to EPD_MODE_CLOCK arms one full calendar render so the
+// time reappears immediately instead of at the next minute boundary.
+uint8_t epd_clock_set_mode(uint8_t mode);
+
+// Current display mode (0 or 1)
+uint8_t epd_clock_get_mode(void);
+
 #endif // EPD_CLOCK_H

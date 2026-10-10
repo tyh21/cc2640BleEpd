@@ -52,6 +52,18 @@ public class EpdDownloader {
     public final static byte EPD_CMD_SET_TIME = 0x50;      // Set time: year_hi, year_lo, month, day, hour, minute, second
     public final static byte EPD_CMD_GET_TIME = 0x51;       // Get time: returns 8 bytes
 
+    // Display mode.  0 = clock (the calendar, repainted every minute),
+    // 1 = image (whatever was pushed stays on screen; the clock stops
+    // overwriting it).  The firmware switches to image mode by itself after
+    // every successful image push, so the only way back to the calendar is
+    // an explicit SET_MODE 0 - which is what the buttons next to "Sync Time"
+    // and the NFC page's "back to clock" button send.
+    public final static byte EPD_CMD_SET_MODE = 0x70;       // data[0] = 0 clock / 1 image
+    public final static byte EPD_CMD_GET_MODE = 0x71;       // returns: 0x71 <mode>
+
+    public final static byte EPD_MODE_CLOCK = 0;
+    public final static byte EPD_MODE_IMAGE = 1;
+
     public EpdDownloader() {
         for (int i = 0; i < black_buf.length; i++) {
             black_buf[i] = (byte) 0xff;

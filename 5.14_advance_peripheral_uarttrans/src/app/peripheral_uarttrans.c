@@ -170,6 +170,12 @@ PIN_Handle hGpioPin;
 
 uint16 currentMTUSize;
 
+/* ICall free heap, exported by icall.o.  Printing it on every connection
+ * state change is the cheapest way to see how much room the BLE5 stack has
+ * left - a starved heap is what silently breaks a central's service
+ * discovery (see AssertHandler in main.c). */
+extern uint32_t heapmgrMemFreeTotal;
+
 /*********************************************************************
  * LOCAL VARIABLES
  */
@@ -614,6 +620,24 @@ static void SPPBLEServer_taskFxn(UArg a0, UArg a1)
         }
       }
 
+      // The 5 s application clock (started on connect) doubles as the
+      // safety net for a pending ATT response.
+      if (events & SBP_PERIODIC_EVT)
+      {
+        /* pAttRsp != NULL means the GATT server could not transmit an ATT
+         * response when the central's request arrived ("no HCI buffer was
+         * available" - a memory shortage).  TI's comment on that path says
+         * the ATT client then "times out (after 30s) and drops the
+         * connection", which is EXACTLY the disconnect we saw ~40 s after
+         * a connect with nothing logged on the device.
+         *
+         * The conn-event-end hook above is a CC254x-era mechanism and is
+         * not reliable on BLE5, so retry here too: a 5 s retry is far
+         * inside the central's 30 s budget and costs one comparison when
+         * there is nothing pending. */
+        SPPBLEServer_sendAttRsp();
+      }
+
       // If RTOS queue is not empty, process app message.
       if (events & SBP_QUEUE_EVT)
       {
@@ -763,8 +787,15 @@ static uint8_t SPPBLEServer_processGATTMsg(gattMsgEvent_t *pMsg)
   // See if GATT server was unable to transmit an ATT response
   if (pMsg->hdr.status == blePending)
   {
-    // No HCI buffer was available. Let's try to retransmit the response
-    // on the next connection event.
+    /* "No HCI buffer was available" - a memory shortage.  This is the one
+     * event that explains the whole BLE symptom (connect OK, MTU OK, then
+     * the central's service discovery stalls and it drops the link ~30 s
+     * later) and it is otherwise COMPLETELY SILENT on the device, so log
+     * it together with the number that matters. */
+    HWUART_Printf("ATT rsp pending: no HCI buffer, heap free=%u B\r\n",
+                  (unsigned)heapmgrMemFreeTotal);
+
+    // Let's try to retransmit the response on the next connection event.
     if (HCI_EXT_ConnEventNoticeCmd(pMsg->connHandle, selfEntity,
                                    SBP_HCI_CONN_EVT_END_EVT) == SUCCESS)
     {
@@ -777,6 +808,8 @@ static uint8_t SPPBLEServer_processGATTMsg(gattMsgEvent_t *pMsg)
       // Don't free the response message yet
       return (FALSE);
     }
+
+    HWUART_Printf("ATT rsp DROPPED (conn event notice failed)\r\n");
   }
   else if (pMsg->method == ATT_FLOW_CTRL_VIOLATED_EVENT)
   {
@@ -981,6 +1014,8 @@ static void SPPBLEServer_processStateChangeEvt(gaprole_States_t newState)
 
           HWUART_Printf("%s\r\n", "CONNECTED...");
         }
+
+        HWUART_Printf("heap free=%u B\r\n", (unsigned)heapmgrMemFreeTotal);
       }
       break;
 
@@ -992,12 +1027,14 @@ static void SPPBLEServer_processStateChangeEvt(gaprole_States_t newState)
       SPPBLEServer_freeAttRsp(bleNotConnected);
 
       HWUART_Printf("%s\r\n", "DISCONNECTED...");
+      HWUART_Printf("heap free=%u B\r\n", (unsigned)heapmgrMemFreeTotal);
       break;
 
     case GAPROLE_WAITING_AFTER_TIMEOUT:
       SPPBLEServer_freeAttRsp(bleNotConnected);
 
       HWUART_Printf("%s\r\n", "DISCONNECTED AFTER TIMEOUT...");
+      HWUART_Printf("heap free=%u B\r\n", (unsigned)heapmgrMemFreeTotal);
       break;
 
     case GAPROLE_ERROR:

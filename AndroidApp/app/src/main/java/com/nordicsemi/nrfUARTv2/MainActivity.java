@@ -116,6 +116,7 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
     private Button btnStartDownload;
     private TextView textViewDownloadInfo;
     private TextView textViewFwVer;
+    private TextView textViewMode;
     EpdDownloader epdDownloader = new EpdDownloader();
 
     private boolean hasBluetoothPermissions() {
@@ -215,6 +216,7 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
 
         textViewDownloadInfo = (TextView) findViewById(R.id.textView_downlload_info);
         textViewFwVer = (TextView) findViewById(R.id.textViewFwVer);
+        textViewMode = (TextView) findViewById(R.id.textView_mode);
 
         // Handler Disconnect & Connect button
         btnConnectDisconnect.setOnClickListener(new View.OnClickListener() {
@@ -357,6 +359,30 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 value[7] = (byte) ((ms >> 8) & 0xFF);
                 value[8] = (byte) (ms & 0xFF);
                 sendMcuRequest(value);
+
+                // 对完时间一般就是想看表盘，顺手切回时钟模式：设备刷完图会
+                // 自己锁进图片模式，不切回来的话画面不会变，看起来就像
+                // "时钟切不回去"。
+                mHandler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        sendMode(EpdDownloader.EPD_MODE_CLOCK);
+                    }
+                }, 400);
+            }
+        });
+
+        // 显示模式：时钟 / 图片
+        Button btnModeClock = (Button) this.findViewById(R.id.button_mode_clock);
+        btnModeClock.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                sendMode(EpdDownloader.EPD_MODE_CLOCK);
+            }
+        });
+        Button btnModeImage = (Button) this.findViewById(R.id.button_mode_image);
+        btnModeImage.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                sendMode(EpdDownloader.EPD_MODE_IMAGE);
             }
         });
 
@@ -367,6 +393,14 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 byte[] value = new byte[1];
                 value[0] = EpdDownloader.EPD_CMD_GET_TIME;
                 sendMcuRequest(value);
+            }
+        });
+
+        // NFC 传图：打开 NFC 传图页（选图片 -> 贴卡刷屏，不需要蓝牙）
+        Button btnNfcEsl = (Button) this.findViewById(R.id.button_nfc_esl);
+        btnNfcEsl.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, NfcEslActivity.class));
             }
         });
     }
@@ -822,6 +856,11 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 break;
             case EpdDownloader.EPD_CMD_DEINIT:
                 Log.i(TAG, "handleMcuResponse: got cmd deinit response, all finish");
+                // 一次传图流程结束（此时固件已自动锁进图片模式），读一次
+                // 真实模式，让界面上的模式标签和屏上内容对得上。
+                buf = new byte[1];
+                buf[0] = EpdDownloader.EPD_CMD_GET_MODE;
+                sendMcuRequest(buf);
                 break;
 
             case EpdDownloader.EPD_CMD_SET_TIME:
@@ -845,10 +884,39 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 }
                 break;
 
+            case EpdDownloader.EPD_CMD_SET_MODE:
+            case EpdDownloader.EPD_CMD_GET_MODE:
+                // 固件两个命令都回 [cmd, mode]，用真正生效的模式刷新界面，
+                // 不靠"我发了什么"来猜。
+                if (frame.length >= 2) {
+                    showMode(frame[1] & 0xFF);
+                }
+                break;
+
             default:
                 Log.w(TAG, "handleMcuResponse: unknown cmd type");
                 break;
         }
+    }
+
+    /** 切换显示模式：0 = 时钟（每分钟重画表盘）/ 1 = 图片（画面一直保留）。 */
+    private void sendMode(byte mode) {
+        byte[] value = new byte[2];
+        value[0] = EpdDownloader.EPD_CMD_SET_MODE;
+        value[1] = mode;
+        sendMcuRequest(value);
+        if (textViewMode != null) {
+            textViewMode.setText("显示模式: 已请求" + (mode == EpdDownloader.EPD_MODE_CLOCK ? "时钟" : "图片"));
+        }
+    }
+
+    private void showMode(int mode) {
+        boolean img = (mode & 1) != 0;
+        if (textViewMode != null) {
+            textViewMode.setText("显示模式: " + (img ? "图片（画面保留，时钟不再覆盖）"
+                                                    : "时钟（每分钟自动刷新）"));
+        }
+        Toast.makeText(MainActivity.this, img ? "图片模式" : "时钟模式", Toast.LENGTH_SHORT).show();
     }
 
     protected void sendMcuRequest(byte[] frame) {

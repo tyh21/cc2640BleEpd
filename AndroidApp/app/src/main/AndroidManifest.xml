@@ -15,8 +15,8 @@
 -->
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="43"
-    android:versionName="2.0" >
+    android:versionCode="46"
+    android:versionName="2.3" >
 
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
@@ -26,6 +26,8 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <application 
         android:label="@string/app_name"
@@ -43,6 +45,33 @@
             </intent-filter>
         </activity>
         <activity android:name=".DeviceListActivity" android:label="@string/app_name" android:theme="@style/DeviceListTheme" android:exported="false" />
+
+        <!--
+            NFC 传图：手机贴到价签天线上直接刷图，不经过蓝牙。
+            入口只有一个 —— 主界面底部按钮 / 贴卡自动拉起。
+            刻意不注册 LAUNCHER，桌面上只留一个 BleEpd 图标。
+        -->
+        <activity
+            android:name=".NfcEslActivity"
+            android:exported="true"
+            android:label="NFC 传图"
+            android:launchMode="singleTop"
+            android:configChanges="keyboardHidden|orientation|screenSize">
+            <!--
+                贴卡直接进本页（App 没打开时自动拉起）。
+                不加这段的话，贴卡会落到系统自带的「发现新标签」界面，
+                那个弹窗是 Android 系统弹的，任何 App 都压不住，
+                只有注册了 TECH_DISCOVERED 把卡"接管"过来才会消失。
+            -->
+            <intent-filter>
+                <action android:name="android.nfc.action.TECH_DISCOVERED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.action.TECH_DISCOVERED"
+                android:resource="@xml/nfc_tech_filter" />
+        </activity>
+
         <service android:enabled="true" android:name=".UartService" android:exported="false" />
     </application>
 

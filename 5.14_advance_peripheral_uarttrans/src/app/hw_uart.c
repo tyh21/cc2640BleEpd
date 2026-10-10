@@ -22,31 +22,49 @@ static void Uart_WriteCallback(UART_Handle handle, void *txBuf, size_t size)
 void HWUART_Init()
 {
   
-  UART_init();                                      //³õÊ¼»¯Ä£¿éµÄ´®¿Ú¹¦ÄÜ
-  UART_Params_init(&UARTparams);                    //³õÊ¼»¯´®¿Ú²ÎÊý
-  UARTparams.baudRate = 115200;                     //´®¿Ú²¨ÌØÂÊ115200
-  UARTparams.dataLength = UART_LEN_8;               //´®¿ÚÊý¾ÝÎ»8
-  UARTparams.stopBits = UART_STOP_ONE;              //´®¿ÚÍ£Ö¹Î»1
-  UARTparams.readDataMode = UART_DATA_BINARY;       //´®¿Ú½ÓÊÕÊý¾Ý²»×ö´¦Àí
-  UARTparams.writeDataMode = UART_DATA_TEXT;        //´®¿Ú·¢ËÍÊý¾Ý²»×ö´¦Àí
-  UARTparams.readMode = UART_MODE_CALLBACK;         //´®¿ÚÒì²½¶Á
+  UART_init();                                      //ï¿½ï¿½Ê¼ï¿½ï¿½Ä£ï¿½ï¿½Ä´ï¿½ï¿½Ú¹ï¿½ï¿½ï¿½
+  UART_Params_init(&UARTparams);                    //ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½Ú²ï¿½ï¿½ï¿½
+  UARTparams.baudRate = 115200;                     //ï¿½ï¿½ï¿½Ú²ï¿½ï¿½ï¿½ï¿½ï¿½115200
+  UARTparams.dataLength = UART_LEN_8;               //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»8
+  UARTparams.stopBits = UART_STOP_ONE;              //ï¿½ï¿½ï¿½ï¿½Í£Ö¹Î»1
+  UARTparams.readDataMode = UART_DATA_BINARY;       //ï¿½ï¿½ï¿½Ú½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  UARTparams.writeDataMode = UART_DATA_TEXT;        //ï¿½ï¿½ï¿½Ú·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  UARTparams.readMode = UART_MODE_CALLBACK;         //ï¿½ï¿½ï¿½ï¿½ï¿½ì²½ï¿½ï¿½
   UARTparams.writeMode = UART_MODE_BLOCKING;        //   
-  UARTparams.readEcho = UART_ECHO_OFF;              //´®¿Ú²»»ØÏÔ
-  UARTparams.readReturnMode = UART_RETURN_NEWLINE;  //µ±½ÓÊÕµ½»»ÐÐ·ûÊ±£¬»Øµ÷
+  UARTparams.readEcho = UART_ECHO_OFF;              //ï¿½ï¿½ï¿½Ú²ï¿½ï¿½ï¿½ï¿½ï¿½
+  UARTparams.readReturnMode = UART_RETURN_NEWLINE;  //ï¿½ï¿½ï¿½ï¿½ï¿½Õµï¿½ï¿½ï¿½ï¿½Ð·ï¿½Ê±ï¿½ï¿½ï¿½Øµï¿½
   UARTparams.readCallback = Uart_ReadCallback;      //
   UARTparams.writeCallback = Uart_WriteCallback;    //
   
-  UARTHandle = UART_open(Board_UART0, &UARTparams); //´ò¿ª´®¿ÚÍ¨µÀ
- // UART_control(UARTHandle, UARTCC26XX_RETURN_PARTIAL_ENABLE,  NULL);   //ÔÊÐí½ÓÊÕ²¿·Ö»Øµ÷
+  UARTHandle = UART_open(Board_UART0, &UARTparams); //ï¿½ò¿ª´ï¿½ï¿½ï¿½Í¨ï¿½ï¿½
+ // UART_control(UARTHandle, UARTCC26XX_RETURN_PARTIAL_ENABLE,  NULL);   //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ²ï¿½ï¿½Ö»Øµï¿½
   
 }
 
 void HWUART_Printf(const char* format, ...)
 {
       va_list arg;
+
+  /* May be called from an assert raised before HWUART_Init(), or from a
+   * context that never ran it at all - a NULL handle must be a no-op and
+   * never a dereference. */
+  if (UARTHandle == NULL) {
+    return;
+  }
+
   va_start(arg,format);
   uint8_t buf[108];
   uint16_t len;
   len = vsprintf((char*)buf, format, arg);
+  va_end(arg);
   UART_write(UARTHandle, buf, len);
+}
+
+// Raw write with an explicit length - no formatting, no temporary buffer.
+// The NFC log drain uses it so that "flush" has a predictable cost.
+void HWUART_Write(const uint8_t *buf, uint16_t len)
+{
+  if (UARTHandle != NULL && len > 0) {
+    UART_write(UARTHandle, (void *)buf, len);
+  }
 }

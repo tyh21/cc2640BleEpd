@@ -216,6 +216,44 @@
                     android:text="Get Time" />
             </LinearLayout>
 
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" >
+
+                <Button
+                    android:id="@+id/button_mode_clock"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="时钟模式" />
+
+                <Button
+                    android:id="@+id/button_mode_image"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="图片模式" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/textView_mode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="显示模式: --" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" >
+
+                <Button
+                    android:id="@+id/button_nfc_esl"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="NFC 传图（贴卡刷屏，不需要蓝牙）" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/textView_time"
                 android:layout_width="match_parent"
