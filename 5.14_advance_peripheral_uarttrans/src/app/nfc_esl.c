@@ -436,10 +436,13 @@ static void img_stream_block(const uint8_t *inf, uint8_t len, uint16_t base)
 
     if (s_panel_ready != 0u) {
         /* pos = P2 * 250 + offset inside the packet; the driver re-arms the
-         * RAM address on every call, so a retransmitted block is harmless */
+         * RAM address on every call, so a retransmitted block is harmless.
+         * Take the panel lock so a BLE/clock render cannot interleave. */
+        EPD_Panel_Acquire();
         EPD_2IN13_WriteRAMAt((uint32_t)s_img_seq * EPD_PKT_BYTES +
                              (uint32_t)(from - EPD_HDR),
                              &inf[from - base], (int)(end - from));
+        EPD_Panel_Release();
     } else if (s_img_seq == 0u && from == EPD_HDR) {
         /* Only once per image, or the tiny log buffer overflows instantly.
          * Visible on purpose: silent data loss is what made the dead-panel
@@ -578,22 +581,26 @@ static void on_frame(const uint8_t *g, uint8_t n)
  */
 static uint8_t panel_try_init(void)
 {
+    uint8_t ok;
+
     if (s_panel_ready != 0u) return 1u;
 
+    EPD_Panel_Acquire();
     epd_hw_init();                 /* idempotent - shared with task_epd.c */
 
     EPD_2IN13_Init();              /* reset, LUT, RAM window (16B x 250)   */
 
     if (EPD_2IN13_IsBusy() != 0u) {
-        return 0u;                 /* panel still not answering            */
+        ok = 0u;                   /* panel still not answering            */
+    } else {
+        /* start every session from a clean white window, so any area the
+         * phone does not cover is white and not whatever was there before */
+        EPD_2IN13_PrepareBlkRAM(); /* 4000 x 0xFF, address re-armed at 0   */
+        s_panel_ready = 1u;
+        ok = 1u;
     }
-
-    /* start every session from a clean white window, so any area the phone
-     * does not cover is white and not whatever was there before */
-    EPD_2IN13_PrepareBlkRAM();     /* 4000 x 0xFF, address re-armed at 0   */
-
-    s_panel_ready = 1u;
-    return 1u;
+    EPD_Panel_Release();
+    return ok;
 }
 
 /* ======================= the task =======================
@@ -711,7 +718,9 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
         if (s_redraw != 0u) {
             s_redraw = 0u;
             s_redraws++;
+            EPD_Panel_Acquire();
             EPD_2IN13_UpdateDisplayAsync();
+            EPD_Panel_Release();
             g_epd_busy = 0x01u;
             s_epd_high = 0u; s_epd_low = 0u; s_epd_wait = 0u;
             lg_s("F0 D4 -> refresh started (");
@@ -731,7 +740,9 @@ static void NfcEsl_taskFxn(UArg a0, UArg a1)
                     s_epd_low  = 0u;
                     /* drop the analog current now that nobody needs it, but
                      * keep VCC + RAM so the next tap can just refresh */
+                    EPD_Panel_Acquire();
                     EPD_2IN13_SleepLight();
+                    EPD_Panel_Release();
                     /* the picture is on the panel and stays there: the
                      * 1-minute clock tick may not paint over it.  This is
                      * the sticky part - the old code only held the clock

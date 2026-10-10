@@ -203,8 +203,16 @@ void TaskEPD_taskFxn(UArg a0, UArg a1)
     
     if(events & EPDTASK_EVENT_RX_REQUEST)
     {
+#ifndef EPD_DRY_RUN
+      /* One panel owner at a time: the BLE image commands and the NFC
+       * respondent share SPI0 + the SSD1680 RAM, so hold the panel lock for
+       * the whole command. */
+      EPD_Panel_Acquire();
+#endif
       handle_cmd();
-      
+#ifndef EPD_DRY_RUN
+      EPD_Panel_Release();
+#endif
       
       // debug
    //   Util_delay_ms(10*1000);
@@ -229,11 +237,15 @@ void TaskEPD_taskFxn(UArg a0, UArg a1)
         if (refresh)
         {
 #ifndef EPD_DRY_RUN
+          /* the render drives the panel for seconds - take the lock so a
+           * concurrent NFC tap (or BLE image command) cannot interleave */
+          EPD_Panel_Acquire();
           if (refresh == 2) {
             epd_clock_render(0);  // full refresh (after set_time)
           } else {
             epd_clock_render(1);  // partial refresh (minute boundary)
           }
+          EPD_Panel_Release();
 #endif
         }
       }

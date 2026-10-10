@@ -5,6 +5,8 @@
 #include <ti/drivers/SPI.h>
 #include <ti/drivers/spi/SPICC26XXDMA.h>
 #include <ti/sysbios/knl/Task.h>
+#include <ti/sysbios/knl/Semaphore.h>
+#include <ti/sysbios/BIOS.h>
 
 #include "board.h"
 
@@ -152,6 +154,37 @@ static void DEV_SPI_WriteByte(uint8_t byte)
   
 }
 
+/* ---- panel arbitration ----
+ * One binary semaphore guards the panel (SPI0 + SSD1680 RAM).  Binary and not
+ * a priority-inheriting gate on purpose: the only two contenders are the EPD
+ * task (priority 2) and the NFC task (priority 1), so when the higher-priority
+ * EPD task blocks on a lock the NFC task holds, the scheduler simply runs NFC
+ * to completion - there is no third task in that priority band to invert
+ * against.  See epd2in13.h for the contract. */
+static Semaphore_Struct EPD_panelSemStruct;
+static Semaphore_Handle EPD_panelSem = NULL;
+
+static void epd_panel_arb_init(void)
+{
+    Semaphore_Params sp;
+    if (EPD_panelSem != NULL) return;
+    Semaphore_Params_init(&sp);
+    sp.mode = Semaphore_Mode_BINARY;
+    Semaphore_construct(&EPD_panelSemStruct, 1, &sp);
+    EPD_panelSem = Semaphore_handle(&EPD_panelSemStruct);
+}
+
+void EPD_Panel_Acquire(void)
+{
+    if (EPD_panelSem == NULL) epd_panel_arb_init();
+    Semaphore_pend(EPD_panelSem, BIOS_WAIT_FOREVER);
+}
+
+void EPD_Panel_Release(void)
+{
+    if (EPD_panelSem != NULL) Semaphore_post(EPD_panelSem);
+}
+
 // should be only called once!
 void epd_hw_init()
 {
@@ -161,6 +194,8 @@ void epd_hw_init()
     if (GPIOHandle != NULL) {
         return;
     }
+
+    epd_panel_arb_init();   /* construct the panel lock exactly once */
 
     HwUARTPrintf("setup epd gpio\r\n");
     GPIOHandle = PIN_open(&GPIOState, GPIOTable);

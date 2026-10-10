@@ -208,10 +208,13 @@ static gaprole_States_t gapProfileState = GAPROLE_INIT;
 
 
 // GAP - SCAN RSP data (max size = 31 bytes)
+// The 6 name digits after "Peripheral_" are overwritten at run time with the
+// last 3 bytes of the BLE address (see SPPBLEServer_processStateChangeEvt),
+// so each tag advertises a distinct name: "Peripheral_A1B2C3".
 static uint8_t scanRspData[] =
 {
-  // complete name
-  0x15,   // length of this data
+  // complete name: "Peripheral_000000" (11 + 6 = 17 chars)
+  0x12,   // length of this data
   GAP_ADTYPE_LOCAL_NAME_COMPLETE,
   'P',
   'e',
@@ -224,15 +227,12 @@ static uint8_t scanRspData[] =
   'a',
   'l',
   '_',
-  'u',
-  'a',
-  'r',
-  't',
-  't',
-  'r',
-  'a',
-  'n',
-  's',
+  '0',
+  '0',
+  '0',
+  '0',
+  '0',
+  '0',
   
   // connection interval range
   0x05,   // length of this data
@@ -268,7 +268,7 @@ static uint8_t advertData[] =
 };
 
 // GAP GATT Attributes
-static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "SPP BLE Server";
+static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "Peripheral_000000";
 
 // Globals used for ATT Response retransmission
 static gattMsgEvent_t *pAttRsp = NULL;
@@ -985,6 +985,36 @@ static void SPPBLEServer_processStateChangeEvt(gaprole_States_t newState)
         systemId[5] = ownAddress[3];
 
         DevInfo_SetParameter(DEVINFO_SYSTEM_ID, DEVINFO_SYSTEM_ID_LEN, systemId);
+
+        // Advertised name = "Peripheral_XXXXXX" with the last 3 bytes of the
+        // BLE address, so different tags are distinguishable on the phone.
+        // BD_ADDR is LSB-first; print the most significant byte first to match
+        // the usual AA:BB:CC:DD:EE:FF display, i.e. bytes [2],[1],[0].
+        {
+          static const char hexd[] = "0123456789ABCDEF";
+          uint8_t *nm = &scanRspData[13];   // first of the 6 name digits
+          nm[0] = (uint8_t)hexd[(ownAddress[2] >> 4) & 0x0F];
+          nm[1] = (uint8_t)hexd[ownAddress[2] & 0x0F];
+          nm[2] = (uint8_t)hexd[(ownAddress[1] >> 4) & 0x0F];
+          nm[3] = (uint8_t)hexd[ownAddress[1] & 0x0F];
+          nm[4] = (uint8_t)hexd[(ownAddress[0] >> 4) & 0x0F];
+          nm[5] = (uint8_t)hexd[ownAddress[0] & 0x0F];
+
+          // push the updated scan response (advertising may already be running;
+          // the stack uses the new data for every following scan response)
+          GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scanRspData),
+                               scanRspData);
+
+          // keep the GAP "Device Name" characteristic in sync with it
+          attDeviceName[11] = nm[0];
+          attDeviceName[12] = nm[1];
+          attDeviceName[13] = nm[2];
+          attDeviceName[14] = nm[3];
+          attDeviceName[15] = nm[4];
+          attDeviceName[16] = nm[5];
+          GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN,
+                           attDeviceName);
+        }
       }
       break;
 

@@ -15,6 +15,16 @@
 
 void epd_hw_init();
 
+// ---- Panel arbitration ----
+// The panel (SPI0 + the SSD1680 RAM) has three users: the clock render and the
+// BLE image path (both run in the EPD task) and the NFC respondent (its own
+// task).  Every user must hold this lock for the whole time it touches the
+// panel or its RAM, so two producers can never interleave a command/data
+// sequence (which would clobber the shared RAM address counter).  Acquire is
+// blocking; Release must follow every Acquire exactly once.
+void EPD_Panel_Acquire(void);
+void EPD_Panel_Release(void);
+
 // Low-level SPI commands (exposed for gfx library)
 void EPD_2IN13_SendCommand(uint8_t Reg);
 void EPD_2IN13_SendData(uint8_t Data);
