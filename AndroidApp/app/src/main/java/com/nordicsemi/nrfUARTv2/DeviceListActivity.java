@@ -154,32 +154,19 @@ public class DeviceListActivity extends Activity {
             mHandler.postDelayed(new Runnable() {
                 @Override
                 public void run() {
-					mScanning = false;
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        mLEScanner.stopScan(mScanCallback);
-                    } else {
-                        mBluetoothAdapter.stopLeScan(mLeScanCallback);
-                    }
-                        
+                    mScanning = false;
+                    mLEScanner.stopScan(mScanCallback);
                     cancelButton.setText(R.string.scan);
 
                 }
             }, SCAN_PERIOD);
 
             mScanning = true;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                mLEScanner.startScan(mScanCallback);
-            } else {
-                mBluetoothAdapter.startLeScan(mLeScanCallback);
-            }
+            mLEScanner.startScan(mScanCallback);
             cancelButton.setText(R.string.cancel);
         } else {
             mScanning = false;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                mLEScanner.stopScan(mScanCallback);
-            } else {
-                mBluetoothAdapter.stopLeScan(mLeScanCallback);
-            }
+            mLEScanner.stopScan(mScanCallback);
             cancelButton.setText(R.string.scan);
         }
 
@@ -201,21 +188,7 @@ public class DeviceListActivity extends Activity {
         }
     };
 
-    // Old API scan callback (fallback for pre-Lollipop)
-    private BluetoothAdapter.LeScanCallback mLeScanCallback =
-            new BluetoothAdapter.LeScanCallback() {
-
-        @Override
-        public void onLeScan(final BluetoothDevice device, final int rssi, byte[] scanRecord) {
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    addDevice(device, rssi);
-                }
-            });
-        }
-    };
-    
+    // Old API scan callback removed: minSdk is 21.
     private void addDevice(BluetoothDevice device, int rssi) {
         boolean deviceFound = false;
 
@@ -251,23 +224,13 @@ public class DeviceListActivity extends Activity {
     @Override
     public void onStop() {
         super.onStop();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            mLEScanner.stopScan(mScanCallback);
-        } else {
-            mBluetoothAdapter.stopLeScan(mLeScanCallback);
-        }
-    
+        mLEScanner.stopScan(mScanCallback);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            mLEScanner.stopScan(mScanCallback);
-        } else {
-            mBluetoothAdapter.stopLeScan(mLeScanCallback);
-        }
-        
+        mLEScanner.stopScan(mScanCallback);
     }
 
     private OnItemClickListener mDeviceClickListener = new OnItemClickListener() {
@@ -275,12 +238,8 @@ public class DeviceListActivity extends Activity {
         @Override
         public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
             BluetoothDevice device = deviceList.get(position);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                mLEScanner.stopScan(mScanCallback);
-            } else {
-                mBluetoothAdapter.stopLeScan(mLeScanCallback);
-            }
-  
+            mLEScanner.stopScan(mScanCallback);
+
             Bundle b = new Bundle();
             b.putString(BluetoothDevice.EXTRA_DEVICE, deviceList.get(position).getAddress());
 

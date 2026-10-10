@@ -85,8 +85,6 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
     private static final int STATE_OFF = 10;
     private static final int REQUEST_BLUETOOTH_PERMISSIONS = 100;
 
-    TextView mRemoteRssiVal;
-    RadioGroup mRg;
     private int mState = UART_PROFILE_DISCONNECTED;
     private UartService mService = null;
     private BluetoothDevice mDevice = null;
@@ -118,6 +116,64 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
     private TextView textViewFwVer;
     private TextView textViewMode;
     EpdDownloader epdDownloader = new EpdDownloader();
+
+    // ---- 下载健壮性：每帧超时 + 重传 ----
+    // 分块写 (0x16) 带偏移且幂等，所以同一帧可以安全重发；某帧的 ACK 丢了就
+    // 重发该帧，而不是让整条链路卡死。
+    private static final int  DL_TIMEOUT_MS = 800;   // 等一帧 ACK 的时限
+    private static final int  DL_MAX_RETRY  = 6;     // 单帧最多重发次数
+    private boolean downloadActive = false;
+    private byte[]  lastPendingFrame = null;
+    private int     dlRetry = 0;
+    private final Runnable dlTimeout = new Runnable() {
+        @Override public void run() { onDownloadTimeout(); }
+    };
+
+    private void startDownloadSession() {
+        downloadActive = true;
+        lastPendingFrame = null;
+        dlRetry = 0;
+    }
+
+    private void endDownloadSession() {
+        downloadActive = false;
+        lastPendingFrame = null;
+        cancelDownloadTimeout();
+    }
+
+    private void armDownloadTimeout() {
+        mHandler.removeCallbacks(dlTimeout);
+        mHandler.postDelayed(dlTimeout, DL_TIMEOUT_MS);
+    }
+
+    private void cancelDownloadTimeout() {
+        mHandler.removeCallbacks(dlTimeout);
+    }
+
+    /** 发送下载流程中的一帧：记住它、发出去、并起一个重传定时器。 */
+    private void sendDownloadFrame(byte[] frame) {
+        lastPendingFrame = frame;
+        dlRetry = 0;
+        sendMcuRequest(frame);
+        armDownloadTimeout();
+    }
+
+    private void onDownloadTimeout() {
+        if (!downloadActive || lastPendingFrame == null) return;
+        if (mService == null) { endDownloadSession(); return; }
+        if (dlRetry >= DL_MAX_RETRY) {
+            Log.w(TAG, "download timeout, aborted after " + dlRetry + " retries");
+            endDownloadSession();
+            textViewDownloadInfo.setText("timeout, aborted");
+            Toast.makeText(MainActivity.this, "传图超时，请重试", Toast.LENGTH_LONG).show();
+            return;
+        }
+        dlRetry++;
+        Log.w(TAG, "frame ACK timeout, resend #" + dlRetry);
+        textViewDownloadInfo.setText("retry " + dlRetry);
+        mService.writeRXCharacteristic(lastPendingFrame);   // 幂等：同一偏移重写
+        armDownloadTimeout();
+    }
 
     private boolean hasBluetoothPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -173,7 +229,8 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
             requestBluetoothPermissions();
         }
 
-        mBtAdapter = BluetoothAdapter.getDefaultAdapter();
+        BluetoothManager btManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        mBtAdapter = (btManager != null) ? btManager.getAdapter() : null;
         if (mBtAdapter == null) {
             Toast.makeText(this, "Bluetooth is not available", Toast.LENGTH_LONG).show();
             finish();
@@ -314,6 +371,7 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
         btnStartDownload.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 epdDownloader.start();
+                startDownloadSession();
                 // 按协商到的 MTU 决定一次带多少字节: 帧 = 3 头 + 数据, 必须
                 // 放得进一个 ATT 写 (<= MTU-3)。MTU=23 时退化成每帧 17 字节。
                 int mtu = (mService != null) ? mService.getMtu() : 23;
@@ -324,7 +382,7 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 Log.i(TAG, "download start, mtu=" + mtu + ", chunk=" + chunk);
                 byte[] value = new byte[1];
                 value[0] = EpdDownloader.EPD_CMD_READ_VERSION;
-                sendMcuRequest(value);
+                sendDownloadFrame(value);
             }
         });
 
@@ -430,22 +488,14 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
             }
         }, SCAN_PERIOD);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            mLEScanner.startScan(mScanCallback);
-        } else {
-            mBtAdapter.startLeScan(mLeScanCallback);
-        }
+        mLEScanner.startScan(mScanCallback);
     }
 
     private void stopScan() {
         mScanning = false;
         scanStatus.setText("Found " + bleDeviceList.size() + " devices");
         btnScan.setText("Scan");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            mLEScanner.stopScan(mScanCallback);
-        } else {
-            mBtAdapter.stopLeScan(mLeScanCallback);
-        }
+        mLEScanner.stopScan(mScanCallback);
     }
 
     // New API scan callback
@@ -464,19 +514,7 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
         }
     };
 
-    // Old API fallback
-    private BluetoothAdapter.LeScanCallback mLeScanCallback = new BluetoothAdapter.LeScanCallback() {
-        @Override
-        public void onLeScan(final BluetoothDevice device, final int rssi, byte[] scanRecord) {
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    addDevice(device, rssi);
-                }
-            });
-        }
-    };
-
+    // Old API fallback removed: minSdk is 21, so BluetoothLeScanner is always available.
     private void addDevice(BluetoothDevice device, int rssi) {
         boolean found = false;
         for (BluetoothDevice d : bleDeviceList) {
@@ -556,12 +594,6 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
 
         public void onServiceDisconnected(ComponentName classname) {
             mService = null;
-        }
-    };
-
-    private Handler mMsgHandler = new Handler() {
-        @Override
-        public void handleMessage(Message msg) {
         }
     };
 
@@ -815,6 +847,7 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
             return;
         }
         Log.i(TAG, "handleMcuResponse " + bytesToHexString(frame));
+        cancelDownloadTimeout();   // 收到任何回复都说明对端还在
 
         byte[] buf;
 
@@ -827,13 +860,13 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 }
                 buf = new byte[1];
                 buf[0] = EpdDownloader.EPD_CMD_INIT;
-                sendMcuRequest(buf);
+                sendDownloadFrame(buf);
                 break;
             case EpdDownloader.EPD_CMD_INIT:
                 Log.i(TAG, "handleMcuResponse got epd init response, now send prepare");
                 buf = new byte[1];
                 buf[0] = EpdDownloader.EPD_CMD_PREPARE_BLK_RAM;
-                sendMcuRequest(buf);
+                sendDownloadFrame(buf);
                 break;
             case EpdDownloader.EPD_CMD_PREPARE_BLK_RAM:
             case EpdDownloader.EPD_CMD_WRITE_BLK_RAM_BULK:
@@ -841,11 +874,11 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                     Log.d(TAG, "black data finish, verify CRC");
                     buf = new byte[1];
                     buf[0] = EpdDownloader.EPD_CMD_GET_BLK_RAM_CRC;
-                    sendMcuRequest(buf);
+                    sendDownloadFrame(buf);
                 } else {
                     byte[] bulk = epdDownloader.buildNextBulkFrame();
                     if (bulk != null) {
-                        sendMcuRequest(bulk);
+                        sendDownloadFrame(bulk);
                     }
                     int progress = epdDownloader.getProgress();
                     textViewDownloadInfo.setText("writing " + String.valueOf(progress) + " %");
@@ -861,10 +894,11 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                         textViewDownloadInfo.setText("check ok, updating display...");
                         buf = new byte[1];
                         buf[0] = EpdDownloader.EPD_CMD_UPDATE_DISPLAY;
-                        sendMcuRequest(buf);
+                        sendDownloadFrame(buf);
                     } else {
                         Log.w(TAG, "image CRC mismatch dev=0x" + Integer.toHexString(devCrc)
                                 + " host=0x" + Integer.toHexString(hostCrc));
+                        endDownloadSession();
                         textViewDownloadInfo.setText("CRC mismatch, please retry");
                         Toast.makeText(MainActivity.this, "图片校验失败，请重新下发",
                                 Toast.LENGTH_LONG).show();
@@ -878,12 +912,13 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                 textViewDownloadInfo.setText("epd download finish");
                 buf = new byte[1];
                 buf[0] = EpdDownloader.EPD_CMD_DEINIT;
-                sendMcuRequest(buf);
+                sendDownloadFrame(buf);
                 break;
             case EpdDownloader.EPD_CMD_DEINIT:
                 Log.i(TAG, "handleMcuResponse: got cmd deinit response, all finish");
                 // 一次传图流程结束（此时固件已自动锁进图片模式），读一次
                 // 真实模式，让界面上的模式标签和屏上内容对得上。
+                endDownloadSession();
                 buf = new byte[1];
                 buf[0] = EpdDownloader.EPD_CMD_GET_MODE;
                 sendMcuRequest(buf);

@@ -24,10 +24,7 @@ public class EpdDownloader {
     // buf of data to send: 212 rows × 16 bytes = 3392 bytes (13 data + 3 padding per row)
     private  byte[] black_buf  = new byte[HEIGHT * RAM_ROW_SIZE];
 
-    private  int frame_index_black = 0;
     public  final static int FRAME_DATA_SIZE = 16;  // 1 frame = 1 row = 16 bytes (13 data + 3 × 0xFF)
-    private  final static int TOTAL_FRAME_COUNT = HEIGHT;  // 212 frames
-
 
     private  String errString;
 
@@ -128,21 +125,23 @@ public class EpdDownloader {
             // 重置buffer为全0xFF
             for (int i = 0; i < black_buf.length; i++) black_buf[i] = (byte) 0xFF;
 
-            // 逐像素写入 black_buf (16字节/行对齐)
+            // 一次性取回整幅像素 (比逐点 getPixel 快几十倍), 再打包成 16 字节/行
+            int[] pixels = new int[WIDTH * HEIGHT];
+            scaled.getPixels(pixels, 0, WIDTH, 0, 0, WIDTH, HEIGHT);
+            scaled.recycle();
+
             for (int y = 0; y < HEIGHT; y++) {
                 int rowOffset = y * RAM_ROW_SIZE;
+                int p = y * WIDTH;
                 for (int x = 0; x < WIDTH; x++) {
-                    int pixel = scaled.getPixel(x, y);
+                    int pixel = pixels[p + x];
                     int gray = (int)(Color.red(pixel) * 0.299 + Color.green(pixel) * 0.587 + Color.blue(pixel) * 0.114);
                     if (gray < 128) {
-                        int byteIdx = rowOffset + (x >> 3);
-                        int bitIdx = 7 - (x & 7);
-                        black_buf[byteIdx] &= ~(1 << bitIdx);
+                        black_buf[rowOffset + (x >> 3)] &= ~(1 << (7 - (x & 7)));
                     }
                 }
                 // 每行末尾3字节已是0xFF, 无需额外操作
             }
-            scaled.recycle();
 
             Log.i(TAG, "image converted to " + black_buf.length + " bytes");
             return true;
@@ -202,23 +201,6 @@ public class EpdDownloader {
             }
         }
         return crc & 0xFFFF;
-    }
-
-    private static String bytesToHexString(byte[] src) {
-        StringBuilder stringBuilder = new StringBuilder("");
-        if (src == null || src.length <= 0) {
-            return null;
-        }
-        for (int i = 0; i < src.length; i++) {
-            int v = src[i] & 0xFF;
-            String hv = Integer.toHexString(v);
-            if (hv.length() < 2) {
-                stringBuilder.append(0);
-            }
-            stringBuilder.append(hv);
-            stringBuilder.append(' ');
-        }
-        return stringBuilder.toString();
     }
 
 }

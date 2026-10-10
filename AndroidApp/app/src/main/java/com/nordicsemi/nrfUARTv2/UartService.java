@@ -148,10 +148,18 @@ public class UartService extends Service {
             }
         }
 
+        @Deprecated
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt,
                                             BluetoothGattCharacteristic characteristic) {
-            broadcastUpdate(ACTION_DATA_AVAILABLE, characteristic);
+            broadcastUpdate(ACTION_DATA_AVAILABLE, characteristic.getValue());
+        }
+
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt gatt,
+                                            BluetoothGattCharacteristic characteristic,
+                                            byte[] value) {
+            broadcastUpdate(ACTION_DATA_AVAILABLE, value);
         }
     };
 
@@ -160,19 +168,17 @@ public class UartService extends Service {
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
     }
 
+    private void broadcastUpdate(final String action, final byte[] value) {
+        final Intent intent = new Intent(action);
+        intent.putExtra(EXTRA_DATA, value);
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
+    }
+
     private void broadcastUpdate(final String action,
                                  final BluetoothGattCharacteristic characteristic) {
         final Intent intent = new Intent(action);
-
-        // This is special handling for the Heart Rate Measurement profile.  Data parsing is
-        // carried out as per profile specifications:
-        // http://developer.bluetooth.org/gatt/characteristics/Pages/CharacteristicViewer.aspx?u=org.bluetooth.characteristic.heart_rate_measurement.xml
         if (TX_CHAR_UUID.equals(characteristic.getUuid())) {
-        	
-           // Log.d(TAG, String.format("Received TX: %d",characteristic.getValue() ));
             intent.putExtra(EXTRA_DATA, characteristic.getValue());
-        } else {
-        	
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
     }
@@ -314,31 +320,7 @@ public class UartService extends Service {
         mBluetoothGatt.readCharacteristic(characteristic);
     }
 
-    /**
-     * Enables or disables notification on a give characteristic.
-     *
-     * @param characteristic Characteristic to act on.
-     * @param enabled If true, enable notification.  False otherwise.
-     */
     /*
-    public void setCharacteristicNotification(BluetoothGattCharacteristic characteristic,
-                                              boolean enabled) {
-        if (mBluetoothAdapter == null || mBluetoothGatt == null) {
-            Log.w(TAG, "BluetoothAdapter not initialized");
-            return;
-        }
-        mBluetoothGatt.setCharacteristicNotification(characteristic, enabled);
-
-                
-        if (UUID_HEART_RATE_MEASUREMENT.equals(characteristic.getUuid())) {
-            BluetoothGattDescriptor descriptor = characteristic.getDescriptor(
-                    UUID.fromString(SampleGattAttributes.CLIENT_CHARACTERISTIC_CONFIG));
-            descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-            mBluetoothGatt.writeDescriptor(descriptor);
-        }
-    }*/
-    
-    /**
      * Enable TXNotification
      *
      * @return 
@@ -367,17 +349,23 @@ public class UartService extends Service {
         mBluetoothGatt.setCharacteristicNotification(TxChar,true);
         
         BluetoothGattDescriptor descriptor = TxChar.getDescriptor(CCCD);
-        descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-        mBluetoothGatt.writeDescriptor(descriptor);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            mBluetoothGatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        } else {
+            descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+            mBluetoothGatt.writeDescriptor(descriptor);
+        }
     	
     }
     
     public void writeRXCharacteristic(byte[] value)
     {
     
-    	
+    	if (mBluetoothGatt == null) {
+            showMessage("writeRXCharacteristic: not connected");
+            return;
+        }
     	BluetoothGattService RxService = mBluetoothGatt.getService(RX_SERVICE_UUID);
-    	showMessage("mBluetoothGatt null"+ mBluetoothGatt);
     	if (RxService == null) {
             showMessage("Rx service not found!");
             broadcastUpdate(DEVICE_DOES_NOT_SUPPORT_UART);
@@ -389,10 +377,16 @@ public class UartService extends Service {
             broadcastUpdate(DEVICE_DOES_NOT_SUPPORT_UART);
             return;
         }
-        RxChar.setValue(value);
-    	boolean status = mBluetoothGatt.writeCharacteristic(RxChar);
-    	
-        Log.d(TAG, "write TXchar - status=" + status);  
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // API 33+: returns BluetoothStatusCodes (int)
+            int st = mBluetoothGatt.writeCharacteristic(RxChar, value,
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            Log.d(TAG, "write TXchar - status=" + st);
+        } else {
+            RxChar.setValue(value);
+            boolean st = mBluetoothGatt.writeCharacteristic(RxChar);
+            Log.d(TAG, "write TXchar - status=" + st);
+        }
     }
     
     private void showMessage(String msg) {
