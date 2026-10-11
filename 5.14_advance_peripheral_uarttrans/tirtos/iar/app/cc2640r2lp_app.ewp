@@ -228,6 +228,7 @@
                     <state>ICALL_STACK0_ADDR</state>
                     <state>MAX_NUM_BLE_CONNS=1</state>
                     <state>MAX_PDU_SIZE=135</state>
+                    <state>MAX_NUM_PDU=2</state>
                     <state>POWER_SAVING</state>
                     <state>RF_SINGLEMODE</state>
                     <state>STACK_LIBRARY</state>

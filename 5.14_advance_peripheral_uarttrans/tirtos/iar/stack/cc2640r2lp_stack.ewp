@@ -220,6 +220,7 @@
                     <state>OSAL_SNV=1</state>
                     <state>POWER_SAVING</state>
                     <state>RF_SINGLEMODE</state>
+                    <state>MAX_NUM_PDU=2</state>
                     <state>STACK_LIBRARY</state>
                     <state>USE_ICALL</state>
                 </option>

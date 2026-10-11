@@ -121,12 +121,20 @@ Event_Handle hEPDEvent;
 
 #define EPDTASK_EVENT_RX_REQUEST      Event_Id_00
 #define EPDTASK_EVENT_CLOCK_TICK      Event_Id_01
+#define EPDTASK_EVENT_RX_BADLEN       Event_Id_02
 
 
-#define EPDTASK_EVENT_ALL ( EPDTASK_EVENT_RX_REQUEST | EPDTASK_EVENT_CLOCK_TICK )
+#define EPDTASK_EVENT_ALL ( EPDTASK_EVENT_RX_REQUEST | EPDTASK_EVENT_CLOCK_TICK | \
+                            EPDTASK_EVENT_RX_BADLEN )
+
+// B/W RAM window: 250 scan lines x 16 bytes/row (the SSD1680's full frame)
+#define EPD_RAM_BYTES                 4000u
 
 // Flag: image transfer in progress, pause clock refresh
 static uint8_t s_img_transfer_active = 0;
+
+// command byte of an oversized frame (replied to, never executed)
+static uint8_t s_bad_cmd = 0;
                             
                                          
 
@@ -222,6 +230,15 @@ void TaskEPD_taskFxn(UArg a0, UArg a1)
         post_epd_response(epd_resp_frame, resp_fram_len);
       }
       
+    }
+
+    if(events & EPDTASK_EVENT_RX_BADLEN)
+    {
+      /* Frame longer than EPD_RX_FRAME_LEN (only a client sending more than
+       * the firmware buffers).  Do not execute it, but still answer with the
+       * command echo so the central's stop-and-wait never hangs. */
+      epd_resp_frame[0] = s_bad_cmd;
+      post_epd_response(epd_resp_frame, 1);
     }
 
     if(events & EPDTASK_EVENT_CLOCK_TICK)
@@ -334,11 +351,20 @@ void handle_cmd()
                                    (uint16_t)epd_rx_frame[2]);
         uint16_t n   = (uint16_t)(rx_fram_len - 3);
         uint16_t i;
+        if ((uint32_t)off + (uint32_t)n <= EPD_RAM_BYTES) {
 #ifndef EPD_DRY_RUN
-        EPD_2IN13_WriteRAMAt((uint32_t)off, epd_rx_frame + 3, (int)n);
+            EPD_2IN13_WriteRAMAt((uint32_t)off, epd_rx_frame + 3, (int)n);
 #endif
-        for (i = 0; i < n; i++) {
-            s_blk_crc = crc16_update(s_blk_crc, epd_rx_frame[3 + i]);
+            for (i = 0; i < n; i++) {
+                s_blk_crc = crc16_update(s_blk_crc, epd_rx_frame[3 + i]);
+            }
+        } else {
+            /* outside the 4000-byte window: refuse.  The driver masks the Y
+             * counter to 9 bits, so a bogus offset would scribble on the
+             * wrong cells; not folding it into the CRC also makes the
+             * central's end-of-image check fail. */
+            HWUART_Printf("bulk write out of range off=%u n=%u\r\n",
+                          (unsigned)off, (unsigned)n);
         }
     }
     // resp_fram_len 默认 1 -> 回显 0x16 作为 ACK (流控)
@@ -496,8 +522,9 @@ void handle_cmd()
     break;
 
   default:
+    /* unknown command: still echo it back (resp_fram_len stays 1) so a
+     * central that sends something we do not know never waits forever */
     HWUART_Printf("unknown cmd\r\n");
-    resp_fram_len = 0;
     break;
   }
 
@@ -507,7 +534,12 @@ void handle_cmd()
 void EPDTask_parseCommand(uint8_t *pMsg, uint8_t length)
 {
   if (length > EPD_RX_FRAME_LEN) {
-    HWUART_Printf("epd frame too long (%u) - dropped\r\n", (unsigned)length);
+    /* Too long to buffer.  Remember just the command byte and answer it, so
+     * the central's stop-and-wait still resolves instead of timing out. */
+    HWUART_Printf("epd frame too long (%u) - ack'd, not executed\r\n",
+                  (unsigned)length);
+    s_bad_cmd = pMsg[0];
+    Event_post(hEPDEvent, EPDTASK_EVENT_RX_BADLEN);
     return;
   }
   memcpy(epd_rx_frame, pMsg, length);

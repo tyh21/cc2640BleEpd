@@ -131,6 +131,12 @@
 #define SBP_PERIODIC_EVT                      Event_Id_00
 #define SBP_UART_QUEUE_EVT                    Event_Id_02
 
+/* Bound the retries when a notification cannot be sent (no HCI buffer / notify
+ * not enabled): without this the queue event re-arms itself forever and spins.
+ * The central's own chunk retransmit re-drives the queue, so a dropped
+ * response is recovered end-to-end. */
+#define SBP_NOTI_MAX_RETRY                    5
+
 
 #define SBP_ALL_EVENTS                        (SBP_ICALL_EVT        | \
                                                SBP_QUEUE_EVT        | \
@@ -197,6 +203,7 @@ static Queue_Handle appMsgQueue;
 // Queue object used for UART messages
 static Queue_Struct appUARTMsg;
 static Queue_Handle appUARTMsgQueue;
+static uint8_t      notiRetry = 0;
 
 // Task configuration
 Task_Struct sbpTask;
@@ -383,10 +390,11 @@ static void SPPBLEServer_init(void)
   RCOSC_enableCalibration();
   #endif // USE_RCOSC
 
-  // Hard code the BD Address till CC2650 board gets its own IEEE address
-  uint8 bdAddress[B_ADDR_LEN] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 };
-  //uint8 bdAddress[B_ADDR_LEN] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
-  HCI_EXT_SetBDADDRCmd(bdAddress);
+  /* Use the device's own factory-programmed IEEE address.  The CCFG keeps
+   * SET_CCFG_IEEE_BLE_0/1 = 0xFFFFFFFF, so the stack takes the unique MAC
+   * burned into the chip.  (This used to call HCI_EXT_SetBDADDRCmd() with a
+   * hard-coded 00:01:02:03:04:05, which made every board advertise the same
+   * address - and therefore the same "Peripheral_XXXXXX" name.) */
 
   // Create an RTOS queue for message from profile to be sent to app.
   appMsgQueue = Util_constructQueue(&appMsg);
@@ -591,12 +599,9 @@ static void SPPBLEServer_taskFxn(UArg a0, UArg a1)
                 //Send the notification
                 retVal = SerialPortService_SetParameter(SERIALPORTSERVICE_CHAR_DATA, pMsg->length, pMsg->pData);
 
-                if(retVal != SUCCESS)
+                if(retVal == SUCCESS)
                 {
-                  HWUART_Printf("%s\r\n", "Noti FAIL");
-                }
-                else
-                {
+                  notiRetry = 0;
                   //Remove from queue
                   Util_dequeueMsg(appUARTMsgQueue);
 
@@ -604,12 +609,33 @@ static void SPPBLEServer_taskFxn(UArg a0, UArg a1)
                   ICall_freeMsg(pMsg->pData);
                   // Free the space from the message.
                   ICall_free(pMsg);
-                }
 
-                if(!Queue_empty(appUARTMsgQueue))
+                  if(!Queue_empty(appUARTMsgQueue))
+                  {
+                    // Wake up the application to flush out any remaining data.
+                    Event_post(syncEvent, SBP_UART_QUEUE_EVT);
+                  }
+                }
+                else if(++notiRetry >= SBP_NOTI_MAX_RETRY)
                 {
-                  // Wake up the application to flush out any remaining UART data in the queue.
-                  Event_post(syncEvent, SBP_UART_QUEUE_EVT);
+                  // Give up on this response.  The central times out and
+                  // retransmits the chunk, which re-drives the queue.
+                  notiRetry = 0;
+                  HWUART_Printf("Noti FAIL x%u, dropped\r\n", (unsigned)SBP_NOTI_MAX_RETRY);
+                  Util_dequeueMsg(appUARTMsgQueue);
+                  ICall_freeMsg(pMsg->pData);
+                  ICall_free(pMsg);
+
+                  if(!Queue_empty(appUARTMsgQueue))
+                  {
+                    Event_post(syncEvent, SBP_UART_QUEUE_EVT);
+                  }
+                }
+                else
+                {
+                  // No HCI buffer right now.  Keep it queued but DO NOT spin:
+                  // the next response (or the central's retransmit) re-drives us.
+                  HWUART_Printf("Noti FAIL (retry %u)\r\n", (unsigned)notiRetry);
                 }
                 break;
               }

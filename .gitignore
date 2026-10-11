@@ -1,0 +1,25 @@
+# ---- build outputs (do not commit) ----
+out/
+tmp/
+AndroidApp/build/
+AndroidApp/app/build/
+AndroidApp/.gradle/
+.gradle/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---- IDE / editor ----
+.idea/
+*.iml
+.vscode/
+
+# ---- object / list / debug artifacts ----
+*.pbi
+*.pbd
+*.dep
+*.map.bak
+
+# ---- scratch ----
+tmp_ds/

@@ -52,6 +52,7 @@
 
 #include <ti/drivers/Power.h>
 #include <ti/drivers/power/PowerCC26XX.h>
+#include <ti/drivers/Watchdog.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/BIOS.h>
 
@@ -121,6 +122,28 @@ PIN_Handle radCtrlHandle;
 #endif //CC1350_LAUNCHXL
 
 /*******************************************************************************
+ * WATCHDOG
+ */
+/* Reset the MCU if the system ever stops making progress.  Petted from a 1 s
+ * Clock (a Swi), so it only fires on the fatal cases - an assert spinlock,
+ * interrupts left disabled, or a stalled scheduler - while the normal,
+ * sleep-based waits (panel refresh, BLE) keep it fed.  Comment out
+ * ENABLE_WATCHDOG to turn it off. */
+/* #define ENABLE_WATCHDOG */
+#ifdef ENABLE_WATCHDOG
+#define WATCHDOG_TIMEOUT_MS   3000u
+static Watchdog_Handle g_watchdog = NULL;
+
+static void watchdogPetFxn(UArg arg)
+{
+  (void)arg;
+  if (g_watchdog != NULL) {
+    Watchdog_clear(g_watchdog);
+  }
+}
+#endif /* ENABLE_WATCHDOG */
+
+/*******************************************************************************
  * EXTERNS
  */
 
@@ -152,6 +175,30 @@ int main()
   Power_init();
 
   PIN_init(BoardGpioInitTable);
+
+#ifdef ENABLE_WATCHDOG
+  {
+    static Clock_Struct wdtPetClock;
+    static Clock_Params  wdtPetParams;
+    Watchdog_Params wp;
+
+    Watchdog_init();
+    Watchdog_Params_init(&wp);
+    wp.resetMode = Watchdog_RESET_ON;
+    g_watchdog = Watchdog_open(Board_WATCHDOG0, &wp);
+    if (g_watchdog != NULL) {
+      Watchdog_setReload(g_watchdog,
+                         Watchdog_convertMsToTicks(g_watchdog, WATCHDOG_TIMEOUT_MS));
+      Clock_Params_init(&wdtPetParams);
+      wdtPetParams.period    = 1000u * 1000u / Clock_tickPeriod;  /* 1 s */
+      wdtPetParams.startFlag = TRUE;
+      Clock_construct(&wdtPetClock, watchdogPetFxn, 0, &wdtPetParams);
+      HWUART_Printf("watchdog armed (%u ms)\r\n", (unsigned)WATCHDOG_TIMEOUT_MS);
+    } else {
+      HWUART_Printf("watchdog open FAILED\r\n");
+    }
+  }
+#endif
 
 #ifdef CC1350_LAUNCHXL
   // Enable 2.4GHz Radio

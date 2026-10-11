@@ -44,7 +44,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".DeviceListActivity" android:label="@string/app_name" android:theme="@style/DeviceListTheme" android:exported="false" />
+        <!-- DeviceListActivity removed: the main screen has its own in-page scan list -->
 
         <!--
             NFC 传图：手机贴到价签天线上直接刷图，不经过蓝牙。
