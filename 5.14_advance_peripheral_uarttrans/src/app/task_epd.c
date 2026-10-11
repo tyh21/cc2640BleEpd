@@ -103,6 +103,9 @@ EpdResponseCallback respCallback = NULL;
  * 面板 RAM 到底收到了什么. 每次 PrepareBlkRAM 重新开始.
  * 只在顺序发送时成立(正常路径就是顺序发), 重发整图会重置. */
 static uint16_t s_blk_crc = 0xFFFFu;
+/* next byte offset the CRC has covered: a 0x16 chunk whose offset is below
+ * this is a retransmit, so it is written but NOT folded into the CRC again */
+static uint32_t s_blk_next = 0u;
 
 static uint16_t crc16_update(uint16_t crc, uint8_t b)
 {
@@ -362,6 +365,7 @@ void handle_cmd()
     HWUART_Printf("prep blk ram\r\n");
     s_img_transfer_active = 1;
     s_blk_crc = 0xFFFFu;   /* 新一轮图像: 复位整图校验 */
+    s_blk_next = 0u;
     #ifndef EPD_DRY_RUN
    EPD_2IN13_PrepareBlkRAM();
 #endif
@@ -388,8 +392,19 @@ void handle_cmd()
 #ifndef EPD_DRY_RUN
             EPD_2IN13_WriteRAMAt((uint32_t)off, epd_rx_frame + 3, (int)n);
 #endif
-            for (i = 0; i < n; i++) {
-                s_blk_crc = crc16_update(s_blk_crc, epd_rx_frame[3 + i]);
+            if ((uint32_t)off >= s_blk_next) {
+                /* fresh region: fold it into the running CRC and remember how
+                 * far we have covered */
+                for (i = 0; i < n; i++) {
+                    s_blk_crc = crc16_update(s_blk_crc, epd_rx_frame[3 + i]);
+                }
+                s_blk_next = (uint32_t)off + (uint32_t)n;
+            } else {
+                /* retransmit of an already-covered region (the central resends
+                 * the last chunk when it misses an ACK).  The cells are
+                 * rewritten identically, but it must NOT be folded into the
+                 * CRC again or the end-of-image check would fail. */
+                HWUART_Printf("bulk dup off=%u (kept)\r\n", (unsigned)off);
             }
         } else {
             /* outside the 4000-byte window: refuse.  The driver masks the Y
