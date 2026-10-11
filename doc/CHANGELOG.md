@@ -3,8 +3,46 @@
 CC2640R2 BLE 电子价签 —— 固件 / Android App / PC 工具 的主要改动记录。
 
 - 固件版本号见 `src/app/task_epd.c` 的 `VERSION_MAJOR.VERSION_MINOR`
-  （BLE `READ_VERSION 0x22` 会返回），当前 **0.5**。
+  （BLE `READ_VERSION 0x22` 会返回），当前 **0.7**。
 - 时间以本机日期为准；同一轮的多项改动合并记录。
+
+---
+
+## 固件 0.7（2026-10）—— 空闲 / 广播功耗（P0-2）
+
+### 广播
+- 广播间隔 `DEFAULT_ADVERTISING_INTERVAL` **160（100ms）→ 1600（1000ms）**。
+  价签在 GENERAL 可发现模式下**永久广播**，100ms 是最大的空闲电流项；放慢后
+  广播占空比降约 10×，代价只是手机发现慢 1~2 秒。需要更快发现改回 800（500ms）。
+
+### 空闲（走时基座改为 RTC）
+- 走时不再靠 tick 计数：`epd_clock_get_time()` 直接由 RTC（`Clock_getTicks()`）
+  推算当前时刻（从 `set_time` 记下的"时刻+ticks"起算）。因此 **tick 无论多慢、甚至不跑，
+  走时都准**；BLE `GET_TIME` 的"秒"也恢复精确。
+- 新增 `EPDTask_setClockTickEnabled()`（经 `epd_clock_set_mode()` 切换）：
+  - **时钟模式**：tick 周期 **1 分钟**，且**首次到期对齐到分钟边界之后约 1s**
+    （`epd_clock_ms_to_next_minute()`），到点即重绘 → 分钟**准点跳**、空闲唤醒 ↓60×；
+  - **图片模式**：tick 仅作 60s 心跳（不重绘）。
+- `SET_TIME` 之后重排对齐并立即重绘一次；覆盖所有模式切换路径
+  （BLE `0x21/0x30/0x31/0x32/0x70`、NFC F0 D0 等）。
+
+---
+
+## 固件 0.6（2026-10）—— SPI 批量写提速（P0-1）
+
+### 传输：SPI 批量写
+- `epd2in13.c` 新增 `EPD_2IN13_SendDataBuf(buf,len)`：一次 `SPI_transfer` 发送整段数据，
+  期间 e-paper CS 全程拉低。（本板 SPI0 硬件 CS 为 `PIN_UNASSIGNED`，CS 完全由软件
+  `EPD_CS_PIN` 控制；SSD1680 在 CS 持续拉低时自动递增 RAM 地址，故整块流式写入安全。）
+- 改造所有 RAM / LUT 写入，去掉逐字节 `SPI_transfer(count=1)` + 每字节翻 CS：
+  - `Clear` / `PrepareBlkRAM` / `PrepareRedRAM` / `QuickCmd(0x30/0x31/0x32)`：
+    整屏 4000B 由 4000 次单字节传输降为 **250 次**（每行 16B）。
+  - `Display` / `DisplayPartBaseImage` / `DisplayPart`：每行打包 16B 一次发。
+  - `WriteRAM` / `WriteRAMAt`：单次批量（时钟渲染每分钟走这里）。
+  - `LoadFullLUT` / `SwitchToPartialLUT`：70B LUT 一次发（原 70 次单字节）。
+- SPI 时钟 **1 MHz → 4 MHz**（`SPIparams.bitRate`；如某板异常可回落 1 MHz）。
+- 效果：一次全屏 RAM 写的驱动调用数从 ~8000 降到 ~500，刷新阶段 CPU 占用与耗时下降。
+- **待办：上板实测 4 MHz 是否稳定，稳定后可再试 8 MHz。**
 
 ---
 

@@ -452,12 +452,12 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
             }
         });
 
-        // Get time button
-        Button btnGetTime = (Button) this.findViewById(R.id.button_get_time);
-        btnGetTime.setOnClickListener(new View.OnClickListener() {
+        // Switch clock face button (was "Get Time")
+        Button btnSwitchFace = (Button) this.findViewById(R.id.button_get_time);
+        btnSwitchFace.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 byte[] value = new byte[1];
-                value[0] = EpdDownloader.EPD_CMD_GET_TIME;
+                value[0] = EpdDownloader.EPD_CMD_SWITCH_FACE;
                 sendMcuRequest(value);
             }
         });
@@ -942,6 +942,14 @@ public class MainActivity extends Activity implements RadioGroup.OnCheckedChange
                         String.format("%03d", ms);
                     ((TextView) findViewById(R.id.textView_time)).setText("Device time: " + t);
                     Toast.makeText(MainActivity.this, t, Toast.LENGTH_SHORT).show();
+                }
+                break;
+
+            case EpdDownloader.EPD_CMD_SWITCH_FACE:
+                if (frame.length >= 2) {
+                    Toast.makeText(MainActivity.this,
+                        (frame[1] & 0xFF) == 0 ? "表盘: 点阵" : "表盘: 7段LED",
+                        Toast.LENGTH_SHORT).show();
                 }
                 break;
 

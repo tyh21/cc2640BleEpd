@@ -28,6 +28,7 @@ void EPD_Panel_Release(void);
 // Low-level SPI commands (exposed for gfx library)
 void EPD_2IN13_SendCommand(uint8_t Reg);
 void EPD_2IN13_SendData(uint8_t Data);
+void EPD_2IN13_SendDataBuf(const uint8_t *buf, uint16_t len);
 
 void EPD_2IN13_Init();
 void EPD_2IN13_InitPartial();   // partial refresh init (no sleep after)

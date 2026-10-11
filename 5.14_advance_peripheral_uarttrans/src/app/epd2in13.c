@@ -187,6 +187,52 @@ void EPD_Panel_Release(void)
     if (EPD_panelSem != NULL) Semaphore_post(EPD_panelSem);
 }
 
+/* One row / block of "white" for the SSD1680 B/W RAM (0xFF = white).  Used by
+ * the bulk clears and by the row padding of the image writes. */
+static const uint8_t EPD_WHITE_ROW[16] = {
+    0xFFu,0xFFu,0xFFu,0xFFu,0xFFu,0xFFu,0xFFu,0xFFu,
+    0xFFu,0xFFu,0xFFu,0xFFu,0xFFu,0xFFu,0xFFu,0xFFu
+};
+
+/* One row of "black" (0x00).  Used by the all-black quick command. */
+static const uint8_t EPD_BLACK_ROW[16] = {
+    0x00u,0x00u,0x00u,0x00u,0x00u,0x00u,0x00u,0x00u,
+    0x00u,0x00u,0x00u,0x00u,0x00u,0x00u,0x00u,0x00u
+};
+
+/* ---- buffered data write (P0-1) ----
+ * One blocking SPI transfer for a whole run of data bytes, with the e-paper CS
+ * held low for the entire burst.  Safe on this board because the SPI0 hardware
+ * CS pin is PIN_UNASSIGNED (target board file: CC2640R2_LAUNCHCTL_SPI0_CSN =
+ * PIN_UNASSIGNED), so CS is entirely the software EPD_CS_PIN - and the SSD1680
+ * auto-increments its RAM address across a continuous CS-low data burst, which
+ * is exactly how the reference driver streams a frame.
+ *
+ * Before: every byte was its own SPI_transfer(count=1) with CS toggled around
+ * it, so a 250x16 RAM write cost 4000 driver calls + 4000 CS edges.  Now that
+ * write is one transfer per 16-byte row (or one per 70-byte LUT block). */
+void EPD_2IN13_SendDataBuf(const uint8_t *buf, uint16_t len)
+{
+    SPI_Transaction spiTransaction;
+
+    if (len == 0u) return;
+
+    DEV_Digital_Write(EPD_DC_PIN, 1);
+    DEV_Digital_Write(EPD_CS_PIN, 0);
+
+    spiTransaction.arg   = NULL;
+    spiTransaction.count = len;
+    spiTransaction.txBuf = (void *)buf;
+    spiTransaction.rxBuf = NULL;        /* transmit-only: MISO is unused */
+
+    if (!SPI_transfer(SPIHandle, &spiTransaction)) {
+        HwUARTPrintf("spi transf fail\r\n");
+    }
+
+    DEV_Digital_Write(EPD_CS_PIN, 1);
+}
+
+
 // should be only called once!
 void epd_hw_init()
 {
@@ -205,7 +251,7 @@ void epd_hw_init()
     HwUARTPrintf("setup epd spi\r\n");
     SPI_init();
     SPI_Params_init(&SPIparams);
-    SPIparams.bitRate  = 1000000;                    //1MHz
+    SPIparams.bitRate  = 4000000u;   /* 4 MHz (was 1 MHz) - P0-1; fall back to 1 MHz if a board mis-behaves */
     SPIparams.dataSize = 8;
     SPIparams.frameFormat = SPI_POL0_PHA0;
     SPIparams.mode = SPI_MASTER;
@@ -315,8 +361,6 @@ function :	Load the full-refresh waveform set + the analog registers into the
 ******************************************************************************/
 void EPD_2IN13_LoadFullLUT(void)
 {
-    uint8_t i;
-
     EPD_2IN13_SendCommand(0x03);                       // VCOM register
     EPD_2IN13_SendData(EPD_2IN13_lut_full_update[70]);
 
@@ -331,9 +375,7 @@ void EPD_2IN13_LoadFullLUT(void)
     EPD_2IN13_SendData(EPD_2IN13_lut_full_update[75]);
 
     EPD_2IN13_SendCommand(0x32);                       // LUT register (70 B)
-    for (i = 0; i < 70; i++) {
-        EPD_2IN13_SendData(EPD_2IN13_lut_full_update[i]);
-    }
+    EPD_2IN13_SendDataBuf(EPD_2IN13_lut_full_update, 70);
 }
 
 /******************************************************************************
@@ -456,9 +498,7 @@ void EPD_2IN13_Clear(void)
     // Write 250 lines × 16 bytes = 4000 bytes of 0xFF (white)
     EPD_2IN13_SendCommand(0x24);
     for (uint16_t row = 0; row < 250; row++) {
-        for (uint16_t col = 0; col < 16; col++) {
-            EPD_2IN13_SendData(0xFF);
-        }
+        EPD_2IN13_SendDataBuf(EPD_WHITE_ROW, 16);
     }
 
     EPD_2IN13_UpdateDisplay();
@@ -484,22 +524,18 @@ void EPD_2IN13_Display(const uint8_t *Image)
 
     EPD_2IN13_SendCommand(0x24);
     for (uint16_t row = 0; row < 250; row++) {
+        uint8_t rb[16];
         for (uint16_t col = 0; col < 16; col++) {
-            if (row < 212 && col < 13) {
-                // Visible area: use image data
-                EPD_2IN13_SendData(Image[col + row * 13]);
-            } else {
-                // Outside visible area: fill white
-                EPD_2IN13_SendData(0xFF);
-            }
+            rb[col] = (row < 212 && col < 13) ? Image[col + row * 13] : 0xFFu;
         }
+        EPD_2IN13_SendDataBuf(rb, 16);
     }
     EPD_2IN13_UpdateDisplay();
 }
 
 void EPD_2IN13_PrepareBlkRAM(void)
 {
-  uint16_t row, col;
+  uint16_t row;
   // 先填满全白, 确保不可见区域和每行尾部3字节都是白色
   EPD_2IN13_SendCommand(0x4E);
   EPD_2IN13_SendData(0x00);
@@ -508,9 +544,7 @@ void EPD_2IN13_PrepareBlkRAM(void)
   EPD_2IN13_SendData(0x00);
   EPD_2IN13_SendCommand(0x24);
   for (row = 0; row < 250; row++) {
-      for (col = 0; col < 16; col++) {
-          EPD_2IN13_SendData(0xFF);
-      }
+      EPD_2IN13_SendDataBuf(EPD_WHITE_ROW, 16);
   }
 
   // 重置地址到0, 准备接收可见区域数据 (212行×13字节)
@@ -524,7 +558,7 @@ void EPD_2IN13_PrepareBlkRAM(void)
 
 void EPD_2IN13_PrepareRedRAM(void)
 {
-  uint16_t row, col;
+  uint16_t row;
   // 先填满全白
   EPD_2IN13_SendCommand(0x4E);
   EPD_2IN13_SendData(0x00);
@@ -533,9 +567,7 @@ void EPD_2IN13_PrepareRedRAM(void)
   EPD_2IN13_SendData(0x00);
   EPD_2IN13_SendCommand(0x26);
   for (row = 0; row < 250; row++) {
-      for (col = 0; col < 16; col++) {
-          EPD_2IN13_SendData(0xFF);
-      }
+      EPD_2IN13_SendDataBuf(EPD_WHITE_ROW, 16);
   }
 
   // 重置地址到0, 准备接收可见区域数据 (212行×13字节)
@@ -549,9 +581,7 @@ void EPD_2IN13_PrepareRedRAM(void)
 
 void EPD_2IN13_WriteRAM(const uint8_t *buf, const int len)
 {
-    for (int i = 0; i < len; i++) {
-        EPD_2IN13_SendData(buf[i]);
-    }
+    EPD_2IN13_SendDataBuf(buf, (uint16_t)len);
 }
 
 /******************************************************************************
@@ -578,9 +608,7 @@ void EPD_2IN13_WriteRAMAt(uint32_t pos, const uint8_t *buf, int len)
     EPD_2IN13_SendData((uint8_t)((y >> 8) & 0x01u));
 
     EPD_2IN13_SendCommand(0x24);                       // write to B/W RAM
-    for (int i = 0; i < len; i++) {
-        EPD_2IN13_SendData(buf[i]);
-    }
+    EPD_2IN13_SendDataBuf(buf, (uint16_t)len);
 }
 
 /******************************************************************************
@@ -635,8 +663,6 @@ function: Switch LUT and VCOM to partial refresh mode (call after Init, before W
  */
 void EPD_2IN13_SwitchToPartialLUT(void)
 {
-    uint8_t i;
-
     // Set lower VCOM for partial refresh (reduces ghosting)
     EPD_2IN13_SendCommand(0x2C);
     EPD_2IN13_SendData(0x28);
@@ -645,9 +671,7 @@ void EPD_2IN13_SwitchToPartialLUT(void)
 
     // Write partial LUT (70 bytes)
     EPD_2IN13_SendCommand(0x32);
-    for (i = 0; i < 70; i++) {
-        EPD_2IN13_SendData(EPD_2IN13_lut_partial_update[i]);
-    }
+    EPD_2IN13_SendDataBuf(EPD_2IN13_lut_partial_update, 70);
 
     // Write 0x37 register — partial update control
     EPD_2IN13_SendCommand(0x37);
@@ -722,13 +746,11 @@ void EPD_2IN13_DisplayPartBaseImage(const uint8_t *Image)
     // Write new image to 0x24 (black/white RAM)
     EPD_2IN13_SendCommand(0x24);
     for (row = 0; row < 250; row++) {
+        uint8_t rb[16];
         for (col = 0; col < 16; col++) {
-            if (row < 212 && col < 13) {
-                EPD_2IN13_SendData(Image[col + row * 13]);
-            } else {
-                EPD_2IN13_SendData(0xFF);
-            }
+            rb[col] = (row < 212 && col < 13) ? Image[col + row * 13] : 0xFFu;
         }
+        EPD_2IN13_SendDataBuf(rb, 16);
     }
 
     // Write same image to 0x26 (old image RAM) — establishes base
@@ -739,13 +761,11 @@ void EPD_2IN13_DisplayPartBaseImage(const uint8_t *Image)
     EPD_2IN13_SendData(0x00);
     EPD_2IN13_SendCommand(0x26);
     for (row = 0; row < 250; row++) {
+        uint8_t rb[16];
         for (col = 0; col < 16; col++) {
-            if (row < 212 && col < 13) {
-                EPD_2IN13_SendData(Image[col + row * 13]);
-            } else {
-                EPD_2IN13_SendData(0xFF);
-            }
+            rb[col] = (row < 212 && col < 13) ? Image[col + row * 13] : 0xFFu;
         }
+        EPD_2IN13_SendDataBuf(rb, 16);
     }
 }
 
@@ -761,7 +781,6 @@ parameter:
 void EPD_2IN13_DisplayPart(const uint8_t *Image)
 {
     uint16_t row, col;
-    uint8_t b;
 
     // Set RAM address to 0
     EPD_2IN13_SendCommand(0x4E);
@@ -773,13 +792,11 @@ void EPD_2IN13_DisplayPart(const uint8_t *Image)
     // Write new image to 0x24
     EPD_2IN13_SendCommand(0x24);
     for (row = 0; row < 250; row++) {
+        uint8_t rb[16];
         for (col = 0; col < 16; col++) {
-            if (row < 212 && col < 13) {
-                EPD_2IN13_SendData(Image[col + row * 13]);
-            } else {
-                EPD_2IN13_SendData(0xFF);
-            }
+            rb[col] = (row < 212 && col < 13) ? Image[col + row * 13] : 0xFFu;
         }
+        EPD_2IN13_SendDataBuf(rb, 16);
     }
 
     // Write INVERTED new image to 0x26 (old image RAM)
@@ -791,14 +808,11 @@ void EPD_2IN13_DisplayPart(const uint8_t *Image)
     EPD_2IN13_SendData(0x00);
     EPD_2IN13_SendCommand(0x26);
     for (row = 0; row < 250; row++) {
+        uint8_t rb[16];
         for (col = 0; col < 16; col++) {
-            if (row < 212 && col < 13) {
-                b = Image[col + row * 13];
-                EPD_2IN13_SendData(~b);
-            } else {
-                EPD_2IN13_SendData(0x00);  // inverted 0xFF
-            }
+            rb[col] = (row < 212 && col < 13) ? (uint8_t)~Image[col + row * 13] : 0x00u;
         }
+        EPD_2IN13_SendDataBuf(rb, 16);
     }
 }
 
@@ -856,13 +870,11 @@ void EPD_2IN13_QuickCmd(uint8_t cmd)
         EPD_2IN13_SendData(0x00);
         EPD_2IN13_SendCommand(0x24);
         for (row = 0; row < 250; row++) {
+            uint8_t rb[16];
             for (col = 0; col < 16; col++) {
-                if (row < 212 && col < 13) {
-                    EPD_2IN13_SendData((((row / 8) + col) % 2 == 0) ? 0xFF : 0x00);
-                } else {
-                    EPD_2IN13_SendData(0xFF);
-                }
+                rb[col] = (row < 212 && col < 13) ? ((((row / 8) + col) % 2 == 0) ? 0xFFu : 0x00u) : 0xFFu;
             }
+            EPD_2IN13_SendDataBuf(rb, 16);
         }
         EPD_2IN13_UpdateDisplay();
         EPD_2IN13_SleepLight();
@@ -877,9 +889,7 @@ void EPD_2IN13_QuickCmd(uint8_t cmd)
         EPD_2IN13_SendData(0x00);
         EPD_2IN13_SendCommand(0x24);
         for (row = 0; row < 250; row++) {
-            for (col = 0; col < 16; col++) {
-                EPD_2IN13_SendData(0x00);
-            }
+            EPD_2IN13_SendDataBuf(EPD_BLACK_ROW, 16);
         }
         EPD_2IN13_UpdateDisplay();
         EPD_2IN13_SleepLight();

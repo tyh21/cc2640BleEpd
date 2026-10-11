@@ -50,6 +50,8 @@ public class EpdDownloader {
     public final static byte EPD_CMD_SET_TIME = 0x50;      // Set time: year_hi, year_lo, month, day, hour, minute, second
     public final static byte EPD_CMD_GET_TIME = 0x51;       // Get time: returns 8 bytes
 
+    public final static byte EPD_CMD_SWITCH_FACE = 0x60;   // Switch clock face: returns [0x60, face] (0=dot-matrix, 1=7-seg LED)
+
     // Display mode.  0 = clock (the calendar, repainted every minute),
     // 1 = image (whatever was pushed stays on screen; the clock stops
     // overwriting it).  The firmware switches to image mode by itself after

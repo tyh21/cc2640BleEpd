@@ -31,7 +31,7 @@
 #include "util.h"
 
 uint8_t VERSION_MAJOR = 0;
-uint8_t VERSION_MINOR = 5;   /* 0.5: + NFC IRQ_N(DIO13) 中断唤醒 */
+uint8_t VERSION_MINOR = 7;   /* 0.7: + P0-2 广播间隔1000ms + 图片模式 tick 降至60s */
 
  
  
@@ -142,10 +142,41 @@ static void handle_cmd();
 void TaskEPD_taskFxn(UArg a0, UArg a1);
 static void post_epd_response(uint8_t *buf, uint16_t len);
 
-// Clock tick period (ms)
-#define CLOCK_TICK_PERIOD_MS  1000
+// Calendar tick period: one minute.  In clock mode the FIRST expiry is aligned
+// to just past the next minute edge so the minute updates on time; in image
+// mode the tick is a plain one-a-minute heartbeat (nothing is repainted).
+// Timekeeping itself is RTC-based (see epd_clock.c), so this tick only triggers
+// a repaint - it never carries the clock.
+#define CLOCK_TICK_PERIOD_MS        60000u
 static Clock_Struct clockTickClock;
 static void clockTickCb(UArg arg);
+static uint8_t s_tick_ready = 0u;   // set once the tick Clock is constructed
+
+/* (re)schedule the tick: fire first after firstMs, then every periodMs */
+static void tickReschedule(uint32_t firstMs, uint32_t periodMs)
+{
+  Clock_Handle h = Clock_handle(&clockTickClock);
+  const uint32_t per_ms = 1000u / Clock_tickPeriod;   /* ticks per ms */
+  if (Clock_isActive(h)) Clock_stop(h);
+  Clock_setTimeout(h, firstMs  * per_ms);
+  Clock_setPeriod (h, periodMs * per_ms);
+  Clock_start(h);
+}
+
+/* P0-2 idle saving: the calendar is only repainted in clock mode, so there the
+ * tick is aligned to the minute edge.  With a pushed image on screen nothing
+ * needs repainting, so the tick is just a slow one-a-minute heartbeat.  The
+ * wall clock keeps running off the RTC either way. */
+void EPDTask_setClockTickEnabled(uint8_t enabled)
+{
+  uint32_t firstMs = CLOCK_TICK_PERIOD_MS;
+  if (!s_tick_ready) return;
+  if (enabled) {
+    uint32_t d = epd_clock_ms_to_next_minute();
+    if (d) firstMs = d;      /* align the first wake to just past the minute */
+  }
+  tickReschedule(firstMs, CLOCK_TICK_PERIOD_MS);
+}
 
 
 void TaskEPD_createTask(void)
@@ -181,9 +212,11 @@ void TaskEPD_taskInit(void)
     // Initialize clock subsystem
     epd_clock_init();
 
-    // Start 1-second periodic clock for clock tick
+    // Construct the calendar tick (one minute; re-aligned to the minute edge
+    // whenever the display mode is set)
     Util_constructClock(&clockTickClock, clockTickCb,
                          CLOCK_TICK_PERIOD_MS, CLOCK_TICK_PERIOD_MS, true, 0);
+    s_tick_ready = 1u;
 }
 
 /*********************************************************************
@@ -463,6 +496,10 @@ void handle_cmd()
     // data: year_lo, month, day, hour, minute, second, ms_hi, ms_lo (8 bytes)
     if (rx_fram_len >= 9) {
         epd_clock_set_time(epd_rx_frame + 1);
+        /* the wall-clock base just moved: re-align the calendar tick to the new
+         * minute edge and repaint now instead of waiting for the next minute */
+        EPDTask_setClockTickEnabled(epd_clock_get_mode() == EPD_MODE_CLOCK);
+        Event_post(hEPDEvent, EPDTASK_EVENT_CLOCK_TICK);
     }
     // resp_fram_len defaults to 1 (set at top of handle_cmd), echoes cmd byte as ACK
     break;
@@ -486,6 +523,8 @@ void handle_cmd()
     case EPD_CMD_SWITCH_FACE:
     HWUART_Printf("switch face\r\n");
     epd_clock_switch_face();
+    /* repaint right away instead of waiting for the next (1-minute) tick */
+    Event_post(hEPDEvent, EPDTASK_EVENT_CLOCK_TICK);
     resp_fram_len = 2;
     epd_resp_frame[1] = epd_clock_get_face();
     break;
@@ -550,8 +589,12 @@ void EPDTask_parseCommand(uint8_t *pMsg, uint8_t length)
 
 static void clockTickCb(UArg arg)
 {
-  epd_clock_tick();
-  Event_post(hEPDEvent, EPDTASK_EVENT_CLOCK_TICK);
+  /* Timekeeping is RTC-based (epd_clock.c), so this tick only triggers a
+   * repaint - and only the calendar needs one.  In image mode it is just a
+   * heartbeat that keeps the periodic Clock (and its re-alignment) alive. */
+  if (epd_clock_get_mode() == EPD_MODE_CLOCK) {
+    Event_post(hEPDEvent, EPDTASK_EVENT_CLOCK_TICK);
+  }
 }
 
 // Called by the NFC responder: while it is streaming an image into the

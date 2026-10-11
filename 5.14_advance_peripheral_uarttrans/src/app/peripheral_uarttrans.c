@@ -78,8 +78,13 @@
  * CONSTANTS
  */
 
-// Advertising interval when device is discoverable (units of 625us, 160=100ms)
-#define DEFAULT_ADVERTISING_INTERVAL          160
+// Advertising interval while discoverable (units of 625us).
+// 160 = 100 ms was the original: very responsive, but on a battery tag that
+// advertises indefinitely in GENERAL discoverable mode it is the single
+// largest idle-current item.  1600 = 1000 ms cuts the advertising duty cycle
+// ~10x; the phone just takes a second or two longer to find the tag.  Drop it
+// to 800 (500 ms) if you want faster discovery.  -- P0-2
+#define DEFAULT_ADVERTISING_INTERVAL          1600
 
 // Limited discoverable mode advertises for 30.72s, and then stops
 // General discoverable mode advertises indefinitely

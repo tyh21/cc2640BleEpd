@@ -26,6 +26,12 @@ void TaskEPD_createTask(void);
 // responder) owns the panel.  active != 0 freezes the clock refresh.
 void EPDTask_setImageTransfer(uint8_t active);
 
+// Calendar tick mode, driven by the display mode (called from epd_clock_set_mode()):
+// clock mode aligns the tick to the minute edge (on-time repaint); image mode
+// uses a plain 60 s heartbeat since nothing is repainted (P0-2 idle saving).
+// The wall clock is RTC-based and runs regardless.
+void EPDTask_setClockTickEnabled(uint8_t enabled);
+
 // called by other task to notify this task with command frame
 //void epd_on_rx_cmd(const uint8_t *buf, int len);
 

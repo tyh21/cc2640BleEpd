@@ -13,11 +13,13 @@
 
 #include <string.h>
 #include <stdint.h>
+#include <ti/sysbios/knl/Clock.h>
 #include "epd_clock.h"
 #include "epd2in13.h"
 #include "epd_font.h"
 #include "lunar.h"
 #include "hw_uart.h"
+#include "task_epd.h"
 
 // =====================================================================
 // Civil date algorithms (Howard Hinnant's "date" library, public domain)
@@ -54,9 +56,8 @@ static void civil_from_days(int32_t z, int32_t *y, int32_t *m, int32_t *d) {
 // State
 // =====================================================================
 
-static volatile uint32_t s_tick_seconds = 0;
 static uint32_t s_set_epoch_sec = 0;
-static uint32_t s_set_tick = 0;
+static uint32_t s_set_ticks = 0;   // RTC tick count captured when set_time ran
 static uint8_t  s_time_is_set = 0;
 static uint8_t  s_force_refresh = 0;
 static uint8_t  s_last_minute = 0xFF;
@@ -314,8 +315,24 @@ static const char *weekday_name(uint16_t year, uint8_t month, uint8_t day)
 // API implementation
 // =====================================================================
 
-void epd_clock_tick(void) {
-    s_tick_seconds++;
+/* Wall-clock seconds now, derived straight from the RTC (Clock_getTicks), so
+ * the time stays correct no matter how slowly - or whether - the periodic tick
+ * runs.  Clock_getTicks() is RTC-backed and keeps counting in standby. */
+static uint32_t now_epoch_sec(void) {
+    const uint32_t ticks_per_sec = 1000000u / Clock_tickPeriod;
+    uint32_t elapsed = (uint32_t)(Clock_getTicks() - s_set_ticks) / ticks_per_sec;
+    return s_set_epoch_sec + elapsed;
+}
+
+/* Milliseconds until just past the next wall-clock minute boundary, for
+ * aligning the calendar tick: wake ~1 s after the edge, repaint, repeat.  The
+ * tick and the wall clock are both derived from the same RTC, so once aligned
+ * they stay aligned.  Returns 0 while the time has not been set. */
+uint32_t epd_clock_ms_to_next_minute(void) {
+    uint32_t sec;
+    if (!s_time_is_set) return 0u;
+    sec = now_epoch_sec() % 60u;
+    return (60u - sec) * 1000u + 1000u;   /* +1 s margin: always past the edge */
 }
 
 void epd_clock_init(void) {
@@ -325,6 +342,7 @@ void epd_clock_init(void) {
     s_last_day_code = 0xFFFF;
     s_clock_face = 0;
     s_display_mode = 0;          /* boot into clock mode */
+    s_set_ticks = (uint32_t)Clock_getTicks();   /* real-time base */
 }
 
 // Switch clock face style and force full refresh
@@ -354,6 +372,11 @@ uint8_t epd_clock_set_mode(uint8_t mode) {
         s_last_day_code  = 0xFFFF;
     }
     s_display_mode = m;
+
+    /* P0-2: align the calendar tick to the minute edge in clock mode, relax it
+     * to a plain heartbeat in image mode (the wall clock runs off the RTC). */
+    EPDTask_setClockTickEnabled(m == 0u);
+
     return s_display_mode;
 }
 
@@ -373,7 +396,7 @@ void epd_clock_set_time(const uint8_t *data) {
     int32_t days = days_from_civil((int32_t)year, (int32_t)month, (int32_t)day) - EPOCH_2000_OFFSET;
     s_set_epoch_sec = (uint32_t)days * 86400U + (uint32_t)hour * 3600U
                       + (uint32_t)minute * 60U + (uint32_t)second;
-    s_set_tick = s_tick_seconds;
+    s_set_ticks = (uint32_t)Clock_getTicks();
     s_time_is_set = 1;
     s_force_refresh = 1;
     s_last_minute = 0xFF;
@@ -388,8 +411,7 @@ epd_time_t epd_clock_get_time(void) {
 
     if (!s_time_is_set) return t;
 
-    uint32_t elapsed = s_tick_seconds - s_set_tick;
-    uint32_t current = s_set_epoch_sec + elapsed;
+    uint32_t current = now_epoch_sec();
 
     int32_t days = (int32_t)(current / 86400U);
     uint32_t day_sec = current % 86400U;

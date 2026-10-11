@@ -36,8 +36,9 @@ void epd_clock_get_time_raw(uint8_t *out);
 // Layout: date line (y=0~15), HH:MM (y=20~51), lunar line (y=56~71)
 void epd_clock_render(uint8_t partial);
 
-// Called every second by Clock callback (posts event to EPD task)
-void epd_clock_tick(void);
+// Milliseconds until just past the next wall-clock minute boundary (0 if the
+// time has not been set).  Used to align the calendar tick.
+uint32_t epd_clock_ms_to_next_minute(void);
 
 // Check if clock display needs refresh (minute boundary)
 // Returns 0=no, 1=partial refresh, 2=force full refresh
