@@ -1,3 +1,14 @@
+---
+AIGC:
+  ContentProducer: '001191110102MAD55U9H0F10002'
+  ContentPropagator: '001191110102MAD55U9H0F10002'
+  Label: '1'
+  ProduceID: '6f9881b4-bb2a-46ec-97c6-5b2edecca9ba'
+  PropagateID: '6f9881b4-bb2a-46ec-97c6-5b2edecca9ba'
+  ReservedCode1: 'd8bf52a8-f441-48f3-aaf2-17972aaa54a6'
+  ReservedCode2: 'd8bf52a8-f441-48f3-aaf2-17972aaa54a6'
+---
+
 # CHANGELOG
 
 CC2640R2 BLE 电子价签 —— 固件 / Android App / PC 工具 的主要改动记录。
@@ -5,6 +16,34 @@ CC2640R2 BLE 电子价签 —— 固件 / Android App / PC 工具 的主要改�
 - 固件版本号见 `src/app/task_epd.c` 的 `VERSION_MAJOR.VERSION_MINOR`
   （BLE `READ_VERSION 0x22` 会返回），当前 **0.7**。
 - 时间以本机日期为准；同一轮的多项改动合并记录。
+
+---
+
+## 固件 0.8（2026-10-12）—— 修复"时钟有时乱跳"（P0 bug）
+
+### Bug：32 位 tick 差值回绕 → 时间偶发倒退 11.9 小时
+- 现象：时钟偶发跳变（时间/日期/星期/农历整体错位），且不定期出现。
+- 根因：`now_epoch_sec()` 用 `Clock_getTicks() - s_set_ticks`（32 位差值）
+  推算流逝秒数；CC26xx `Clock_tickPeriod = 10µs` 下 32 位 tick 计数
+  **每 11.93 小时回绕一次**。SET_TIME 11.9 小时后差值塌缩，
+  显示时间瞬间倒退 11.93h 的整数倍，之后继续正常走——与"有时乱跳"吻合。
+- 修复（`epd_clock.c` + `task_epd.c`）：
+  - 新增 `epd_clock_latch()`：把已流逝整秒结算进 `s_set_epoch_sec`，
+    重置 tick 基准并保留亚秒残差；由 60s 周期 tick（**时钟/图片模式都跑**）
+    每分钟调用 → 差值恒 ≤60s，永不进入回绕窗口。
+  - `epd_clock_set_time()` 写基准三元组（epoch/ticks/flag）改入
+    `Hwi_disable()` 临界区，消除与 Swi 上下文 latch 的竞争窗口。
+
+### Bug：0x16 重传导致整图 CRC 必失败（同轮修复，v15 一并携带）
+- 根因：`s_blk_crc` 按帧**到达顺序**累加，而手机端对整幅图一次性
+  计算。客户端丢 ACK 后重发同一块（0x16 幂等）时，RAM 重写无害，
+  但该块被**再次累进 CRC** → 端到端校验必不一致，重试永远失败。
+- 修复（`task_epd.c`）：新增 `s_blk_next`（CRC 已覆盖到的字节前沿），
+  `0x13 PREPARE` 时清零、`0x16` 写入时 `off >= s_blk_next` 才累加并推进
+  前沿；`off < s_blk_next` 判为重传——RAM 照常幂等重写，
+  **不再重复计入 CRC**（串口打 `bulk dup ... (kept)`）。
+  协议为顺序发送（手机只重发最后一个未确认块），单调前沿判重即完备；
+  手机端无需改动。
 
 ---
 
@@ -132,3 +171,5 @@ CC2640R2 BLE 电子价签 —— 固件 / Android App / PC 工具 的主要改�
 - **无 OAD/DFU**（只能线刷）。
 - **看门狗默认关闭**（见上）。
 - Python 与 HTML 两个上位机功能重复，可考虑合并 / 共用一份协议定义。
+
+> AI生成

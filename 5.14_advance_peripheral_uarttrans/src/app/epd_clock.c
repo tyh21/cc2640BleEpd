@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <ti/sysbios/knl/Clock.h>
+#include <ti/sysbios/knl/Swi.h>
 #include "epd_clock.h"
 #include "epd2in13.h"
 #include "epd_font.h"
@@ -315,13 +316,36 @@ static const char *weekday_name(uint16_t year, uint8_t month, uint8_t day)
 // API implementation
 // =====================================================================
 
-/* Wall-clock seconds now, derived straight from the RTC (Clock_getTicks), so
- * the time stays correct no matter how slowly - or whether - the periodic tick
- * runs.  Clock_getTicks() is RTC-backed and keeps counting in standby. */
+/* ---- wrap-safe time base --------------------------------------------
+ * Clock_getTicks() is 32-bit and, at the CC26xx 10 us tick, wraps every
+ * 2^32 * 10us ~= 11.93 h.  A raw "now - s_set_ticks" difference is only
+ * valid for the first ~11.9 h after set_time - beyond that it collapses and
+ * the displayed time (with date/weekday/lunar) jumps backwards by multiples
+ * of 11.93 h.  This was the "clock sometimes jumps" bug.
+ * Fix: settle the elapsed whole seconds into s_set_epoch_sec every minute
+ * (epd_clock_latch(), called from the 60 s tick that runs in BOTH clock
+ * and image mode), keeping the sub-second remainder in the tick base.
+ * The pending delta is then always <= ~60 s of ticks and can never wrap. */
 static uint32_t now_epoch_sec(void) {
     const uint32_t ticks_per_sec = 1000000u / Clock_tickPeriod;
     uint32_t elapsed = (uint32_t)(Clock_getTicks() - s_set_ticks) / ticks_per_sec;
     return s_set_epoch_sec + elapsed;
+}
+
+/* Settle elapsed time into the epoch base; call at least once per ~11 h
+ * (the 60 s tick calls it once a minute).  Hwi-protected because the caller
+ * runs in Swi context and set_time runs in task context - both touch the
+ * same two words that must stay a matched pair. */
+void epd_clock_latch(void) {
+    const uint32_t ticks_per_sec = 1000000u / Clock_tickPeriod;
+    UInt key = Swi_disable();
+    uint32_t now   = (uint32_t)Clock_getTicks();
+    uint32_t delta  = now - s_set_ticks;
+    if (s_time_is_set) {
+        s_set_epoch_sec += delta / ticks_per_sec;
+    }
+    s_set_ticks = now - (delta % ticks_per_sec);   /* keep sub-second residue */
+    Swi_restore(key);
 }
 
 /* Milliseconds until just past the next wall-clock minute boundary, for
@@ -394,10 +418,14 @@ void epd_clock_set_time(const uint8_t *data) {
     uint16_t ms = ((uint16_t)data[6] << 8) | data[7];
 
     int32_t days = days_from_civil((int32_t)year, (int32_t)month, (int32_t)day) - EPOCH_2000_OFFSET;
-    s_set_epoch_sec = (uint32_t)days * 86400U + (uint32_t)hour * 3600U
-                      + (uint32_t)minute * 60U + (uint32_t)second;
-    s_set_ticks = (uint32_t)Clock_getTicks();
-    s_time_is_set = 1;
+    {
+        UInt key = Swi_disable();   /* atomic pair: epoch + tick base + flag */
+        s_set_epoch_sec = (uint32_t)days * 86400U + (uint32_t)hour * 3600U
+                          + (uint32_t)minute * 60U + (uint32_t)second;
+        s_set_ticks = (uint32_t)Clock_getTicks();
+        s_time_is_set = 1;
+        Swi_restore(key);
+    }
     s_force_refresh = 1;
     s_last_minute = 0xFF;
     s_last_day_code = 0xFFFF;

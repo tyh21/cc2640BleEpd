@@ -40,6 +40,11 @@ void epd_clock_render(uint8_t partial);
 // time has not been set).  Used to align the calendar tick.
 uint32_t epd_clock_ms_to_next_minute(void);
 
+// Settle elapsed RTC seconds into the epoch base and reset the tick
+// difference, so the (32-bit, ~11.93 h wrap) tick delta never accumulates.
+// Call at least once per few hours; the 60 s tick calls it once a minute.
+void epd_clock_latch(void);
+
 // Check if clock display needs refresh (minute boundary)
 // Returns 0=no, 1=partial refresh, 2=force full refresh
 uint8_t epd_clock_need_refresh(void);

@@ -31,7 +31,8 @@
 #include "util.h"
 
 uint8_t VERSION_MAJOR = 0;
-uint8_t VERSION_MINOR = 7;   /* 0.7: + P0-2 广播间隔1000ms + 图片模式 tick 降至60s */
+uint8_t VERSION_MINOR = 8;   /* 0.8: fix clock jumping - settle RTC delta every minute
+                                 (32-bit tick diff used to wrap ~11.93 h after set_time) */
 
  
  
@@ -604,6 +605,13 @@ void EPDTask_parseCommand(uint8_t *pMsg, uint8_t length)
 
 static void clockTickCb(UArg arg)
 {
+  /* Settle the RTC-derived elapsed time into the epoch base once a minute;
+   * this callback runs in BOTH clock and image mode.  Without this, the
+   * 32-bit "now - set_ticks" difference in now_epoch_sec() wraps ~11.93 h
+   * after the last set_time and the displayed time (and date/weekday/lunar)
+   * jumps backwards by 11.9 h steps - the "clock sometimes jumps" bug. */
+  epd_clock_latch();
+
   /* Timekeeping is RTC-based (epd_clock.c), so this tick only triggers a
    * repaint - and only the calendar needs one.  In image mode it is just a
    * heartbeat that keeps the periodic Clock (and its re-alignment) alive. */
